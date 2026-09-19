@@ -1,0 +1,68 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+DerivedData/
+
+# Xcode / IDE
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+.vscode/
+.idea/
+.ace-tool/
+.claude/settings.local.json
+.kilo/worktrees/
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Build products and distribution outputs
+Legado.app/
+*.app/
+*.dmg
+*.ipa
+*.pkg
+*.zip
+*.dSYM/
+*.dSYM.zip
+build/
+
+# Native and compiled artifacts
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+Books/
+Cache/
+logs/
+tmp/
+temp/
+
+# Test and coverage outputs
+.coverage/
+coverage/
+Tests/.build/
+Tests/DerivedData/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Local configuration and secrets
+.env
+.env.*
+.netrc
+Pods/
