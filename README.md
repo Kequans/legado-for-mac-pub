@@ -1,5 +1,9 @@
 # Legado for macOS
 
+<p align="center">
+  <img src="./Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512.png" alt="Legado for macOS 图标" width="96">
+</p>
+
 Legado for macOS 是基于 SwiftUI 的原生阅读器，目标是把 Android 版 Legado 的书源、书架和阅读能力迁移到 macOS，同时保留 Legado 的 JSON 规则格式。
 
 ## 当前能力
@@ -16,6 +20,44 @@ Legado for macOS 是基于 SwiftUI 的原生阅读器，目标是把 Android 版
 
 依赖 Android WebView、Java 类（例如 OkHttp）、登录 UI、音频/图片书专用渲染和 iCloud 同步的功能仍属于兼容边界。
 
+## 界面预览
+
+界面采用 macOS 原生深色布局，覆盖书架、书源、订阅、阅读和项目介绍等主要使用场景。图片按两列排列，GitHub 页面会根据屏幕宽度自动缩放。
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./Resources/书架页面.png" alt="书架页面" width="100%">
+      <br>
+      <sub>书架：管理本地书籍、在线书籍和阅读进度</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="./Resources/书源页面.png" alt="书源页面" width="100%">
+      <br>
+      <sub>书源：导入、筛选、启用和管理 Legado 书源</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="./Resources/阅读页面.png" alt="阅读页面" width="100%">
+      <br>
+      <sub>阅读：章节阅读、局部章节导航和阅读设置</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="./Resources/订阅页面.png" alt="订阅页面" width="100%">
+      <br>
+      <sub>订阅：管理 RSS/Atom 订阅源和文章</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="./Resources/关于页面.png" alt="关于页面" width="52%">
+      <br>
+      <sub>关于：查看版本、更新日志、作者和项目地址</sub>
+    </td>
+  </tr>
+</table>
+
 ## 快速开始
 
 环境要求：macOS 13+、Swift 5.9+，建议使用 Xcode 15+ 或匹配的 Command Line Tools。
@@ -30,6 +72,9 @@ swift run
 # 生成可双击运行的 macOS App
 ./build_app.sh
 open Legado.app
+
+# 生成 GitHub Release 附件（默认只打包，不上传）
+./release.sh
 ```
 
 build_app.sh 会自动定位当前架构的 SwiftPM Release 二进制，组装应用包，生成图标，执行 ad-hoc 签名并校验包结构。详细说明见 Docs/Guides/BUILD_APP.md。
@@ -69,6 +114,7 @@ build_app.sh 会自动定位当前架构的 SwiftPM Release 二进制，组装�
 | --- | --- |
 | 运行项目 | swift run |
 | 构建 App | ./build_app.sh |
+| 生成/上传 Release | ./release.sh |
 | 修改阅读器配置 | Docs/Guides/CONFIG_GUIDE.md |
 | 了解 JavaScript 规则 | Docs/Guides/JAVASCRIPT_SUPPORT.md |
 | 书源规则 | Docs/Reference/BookSourceRules.md |

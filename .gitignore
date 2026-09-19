@@ -24,11 +24,13 @@ xcuserdata/
 
 # Build products and distribution outputs
 Legado.app/
+dist/
 *.app/
 *.dmg
 *.ipa
 *.pkg
 *.zip
+*.sha256
 *.dSYM/
 *.dSYM.zip
 build/
