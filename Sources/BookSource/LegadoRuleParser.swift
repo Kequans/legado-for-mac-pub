@@ -13,15 +13,26 @@ final class LegadoRuleParser {
 
     static func value(in element: Element, rule: String, baseURL: String = "", jsLib: String? = nil) throws -> String {
         let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: rule)
+        let segments = RuleAnalyzer.splitRule(mainRule)
+        if segments.count == 1, let segment = segments.first, segment.mode == .default {
+            return applyCleanRules(try LegacyRuleEvaluator.value(in: element,
+                rule: cleanRulePrefix(segment.content, mode: segment.mode), baseURL: baseURL),
+                cleanRules: cleanRules).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let connectorParts = splitConnector(mainRule)
         if connectorParts.parts.count > 1, let connector = connectorParts.connector {
-            let results = try connectorParts.parts.map {
-                try value(in: element, rule: $0, baseURL: baseURL, jsLib: jsLib)
+            var results: [String] = []
+            for part in connectorParts.parts {
+                let result = try value(in: element, rule: part, baseURL: baseURL, jsLib: jsLib)
+                if connector == .or, !result.isEmpty {
+                    return applyCleanRules(result, cleanRules: cleanRules)
+                }
+                results.append(result)
             }
             let merged: String
             switch connector {
             case .and:
-                merged = results.filter { !$0.isEmpty }.joined()
+                merged = results.filter { !$0.isEmpty }.joined(separator: "\n")
             case .or:
                 merged = results.first(where: { !$0.isEmpty }) ?? ""
             case .mod:
@@ -30,7 +41,6 @@ final class LegadoRuleParser {
             return applyCleanRules(merged, cleanRules: cleanRules)
         }
 
-        let segments = RuleAnalyzer.splitRule(mainRule)
         var result = try element.outerHtml()
 
         for segment in segments {
@@ -78,13 +88,9 @@ final class LegadoRuleParser {
             return result.isEmpty ? [] : [result]
         }
 
-        let elements = try selectElements(html: html, rule: cleanRule, baseURL: baseURL)
-        if !elements.isEmpty {
-            return try elements.map {
-                try value(in: $0, rule: fieldRule(cleanRule), baseURL: baseURL, jsLib: jsLib)
-            }.filter { !$0.isEmpty }
-        }
-        return try LegacyRuleEvaluator.values(html: html, rule: cleanRule, baseURL: baseURL)
+        let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: cleanRule)
+        return try LegacyRuleEvaluator.values(html: html, rule: mainRule, baseURL: baseURL)
+            .map { applyCleanRules($0, cleanRules: cleanRules) }
     }
 
     static func selectElements(html: String, rule: String, baseURL: String = "") throws -> [Element] {

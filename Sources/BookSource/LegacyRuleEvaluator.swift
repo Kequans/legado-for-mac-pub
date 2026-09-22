@@ -28,50 +28,22 @@ final class LegacyRuleEvaluator {
     }
 
     static func value(in root: Element, rule: String, baseURL: String = "") throws -> String {
-        let connection = splitConnector(rule)
-        if connection.parts.count > 1, let connector = connection.connector {
-            let values = try connection.parts.map {
-                try value(in: root, rule: $0, baseURL: baseURL)
-            }
-            switch connector {
-            case .and, .mod:
-                return values.filter { !$0.isEmpty }.joined(separator: "\n")
-            case .or:
-                return values.first(where: { !$0.isEmpty }) ?? ""
-            }
-        }
-        let stages = splitStages(rule)
-        guard !stages.isEmpty else { return "" }
-
-        var elements: [Element] = [root]
-        if stages.count > 1 {
-            for stage in stages.dropLast() {
-                if isValueToken(stage) {
-                    return try extract(elements, token: stage, baseURL: baseURL)
-                }
-                elements = try select(elements, stage)
-            }
-            let last = stages[stages.count - 1]
-            if isValueToken(last) || !looksLikeSelector(last) {
-                return try extract(elements, token: last, baseURL: baseURL)
-            }
-            elements = try select(elements, last)
-            return try extract(elements, token: "text", baseURL: baseURL)
-        }
-
-        let only = stages[0]
-        if isValueToken(only) {
-            return try extract(elements, token: only, baseURL: baseURL)
-        }
-        elements = try select(elements, only)
-        return try extract(elements, token: "text", baseURL: baseURL)
+        try values(in: root, rule: rule, baseURL: baseURL).joined(separator: "\n")
     }
 
     static func values(html: String, rule: String, baseURL: String = "") throws -> [String] {
+        let document = try SwiftSoup.parse(html, baseURL)
+        return try values(in: document, rule: rule, baseURL: baseURL)
+    }
+
+    static func values(in root: Element, rule: String, baseURL: String = "") throws -> [String] {
         let connection = splitConnector(rule)
         if connection.parts.count > 1, let connector = connection.connector {
-            let groupedValues = try connection.parts.map {
-                try values(html: html, rule: $0, baseURL: baseURL)
+            var groupedValues: [[String]] = []
+            for part in connection.parts {
+                let result = try values(in: root, rule: part, baseURL: baseURL)
+                if !result.isEmpty { groupedValues.append(result) }
+                if connection.connector == .or, !result.isEmpty { return result }
             }
             switch connector {
             case .and:
@@ -80,7 +52,7 @@ final class LegacyRuleEvaluator {
                 return groupedValues.first(where: { !$0.isEmpty }) ?? []
             case .mod:
                 var result: [String] = []
-                let maxCount = groupedValues.map { $0.count }.max() ?? 0
+                let maxCount = groupedValues.first?.count ?? 0
                 for index in 0..<maxCount {
                     for group in groupedValues where index < group.count {
                         result.append(group[index])
@@ -89,18 +61,14 @@ final class LegacyRuleEvaluator {
                 return result
             }
         }
-        let document = try SwiftSoup.parse(html, baseURL)
         let stages = splitStages(rule)
-        guard !stages.isEmpty else { return [] }
-        var elements: [Element] = [document]
-
-        for stage in stages {
-            if isValueToken(stage) {
-                return try extractList(elements, token: stage, baseURL: baseURL)
-            }
+        guard let terminal = stages.last else { return [] }
+        var elements: [Element] = [root]
+        for stage in stages.dropLast() {
             elements = try select(elements, stage)
         }
-        return try extractList(elements, token: "text", baseURL: baseURL)
+        // Android treats the last stage as text/HTML or an arbitrary attribute name.
+        return try extractList(elements, token: terminal, baseURL: baseURL)
     }
 
     static func selectElements(html: String, rule: String, baseURL: String = "") throws -> [Element] {
@@ -112,6 +80,21 @@ final class LegacyRuleEvaluator {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("/") || trimmed.lowercased().hasPrefix("@xpath:") {
             return try xpathElements(in: root, rule: trimmed)
+        }
+        let connection = splitConnector(rule)
+        if connection.parts.count > 1, let connector = connection.connector {
+            var groups: [[Element]] = []
+            for part in connection.parts {
+                let selected = try selectElements(in: root, rule: part)
+                if connector == .or, !selected.isEmpty { return selected }
+                groups.append(selected)
+            }
+            if connector == .mod {
+                return (0..<(groups.first?.count ?? 0)).flatMap { index in
+                    groups.compactMap { index < $0.count ? $0[index] : nil }
+                }
+            }
+            return groups.flatMap { $0 }
         }
         let stages = splitStages(rule)
         guard !stages.isEmpty else { return [] }
@@ -170,7 +153,7 @@ final class LegacyRuleEvaluator {
     private static func select(_ roots: [Element], _ rawStage: String) throws -> [Element] {
         let spec = parseSelection(rawStage)
         if spec.selector.isEmpty || spec.selector.caseInsensitiveCompare("children") == .orderedSame {
-            return applyIndex(roots.flatMap { $0.children().array() }, spec)
+            return roots.flatMap { applyIndex($0.children().array(), spec) }
         }
 
         var candidates: [Element] = []
@@ -194,9 +177,9 @@ final class LegacyRuleEvaluator {
             } else {
                 selected = try root.select(selector)
             }
-            candidates.append(contentsOf: selected)
+            candidates.append(contentsOf: applyIndex(selected.array(), spec))
         }
-        return applyIndex(candidates, spec)
+        return candidates
     }
 
     private static func parseSelection(_ raw: String) -> SelectionSpec {
@@ -211,7 +194,9 @@ final class LegacyRuleEvaluator {
         var body: String?
         var excludes = false
 
-        if value.hasSuffix("]"), let open = value.lastIndex(of: "[") {
+        if value.hasSuffix("]"), let open = value.lastIndex(of: "["),
+           value[value.index(after: open)..<value.index(before: value.endIndex)]
+            .range(of: #"^!?[\d\s,:+\-]+$"#, options: .regularExpression) != nil {
             selector = String(value[..<open]).trimmingCharacters(in: .whitespacesAndNewlines)
             body = String(value[value.index(after: open)..<value.index(before: value.endIndex)])
         } else if let bang = value.firstIndex(of: "!"),
@@ -524,7 +509,7 @@ final class LegacyRuleEvaluator {
         var result: [String] = []
         for element in elements {
             let raw = try element.attr(token.hasPrefix("abs:") ? String(token.dropFirst(4)) : token)
-            let value = resolveURL(raw, baseURL: baseURL)
+            let value = token.hasPrefix("abs:") ? resolveURL(raw, baseURL: baseURL) : raw
             if !value.isEmpty, !result.contains(value) { result.append(value) }
         }
         return result

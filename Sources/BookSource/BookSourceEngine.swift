@@ -445,48 +445,9 @@ class BookSourceEngine {
         
         // 使用CSS选择器解析
         print("  📝 开始解析HTML，bookList规则: \(bookListRule)")
-        let doc = try SwiftSoup.parse(html)
-        print("  📝 HTML解析成功")
 
-        // 处理bookList规则中的@符号语法
-        var elements: Elements
-        if bookListRule.contains("@") {
-            // 分离选择器和子选择器
-            let parts = bookListRule.split(separator: "@", maxSplits: 1)
-            if parts.count == 2 {
-                var parentSelector = String(parts[0]).trimmingCharacters(in: .whitespaces)
-                var childSelector = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        let elements = try LegadoRuleParser.selectElements(html: html, rule: bookListRule, baseURL: baseUrl)
 
-                // 转换Android阅读选择器语法
-                parentSelector = convertToStandardCSSSelector(parentSelector)
-                childSelector = convertToStandardCSSSelector(childSelector)
-
-                // 先选择父元素
-                let parentElements = try doc.select(parentSelector)
-                print("  📝 找到 \(parentElements.count) 个父元素（\(parentSelector)）")
-
-                // 从每个父元素中选择子元素
-                elements = Elements()
-                for parent in parentElements {
-                    let children = try parent.select(childSelector)
-                    for child in children {
-                        elements.add(child)
-                    }
-                }
-                print("  📝 从父元素中找到 \(elements.count) 个子元素（\(childSelector)）")
-            } else {
-                // 转换选择器语法后直接选择
-                let convertedSelector = convertToStandardCSSSelector(bookListRule)
-                elements = try doc.select(convertedSelector)
-                print("  📝 找到 \(elements.count) 个书籍元素")
-            }
-        } else {
-            // 转换选择器语法后直接选择
-            let convertedSelector = convertToStandardCSSSelector(bookListRule)
-            elements = try doc.select(convertedSelector)
-            print("  📝 找到 \(elements.count) 个书籍元素")
-        }
-        
         for element in elements {
             var book = SearchBook()
             
@@ -1603,26 +1564,8 @@ class BookSourceEngine {
             return try parseChapterListWithJSON(json: html, bookUrl: bookUrl, baseURL: baseURL, rule: rule)
         }
         
-        let doc = try SwiftSoup.parse(html)
-        
-        // 处理特殊的章节列表选择器（支持@子选择器）
-        var elements: Elements
-        if chapterListRule.contains("@") {
-            // @p、@dd@a 等表示继续选择子元素，必须保留原始 Element，
-            // 不能先提取成纯文本后重新解析，否则 href 等属性会丢失。
-            let selectedElements = try LegadoRuleParser.selectElements(
-                html: html,
-                rule: chapterListRule,
-                baseURL: baseURL
-            )
-            elements = Elements()
-            for element in selectedElements {
-                elements.add(element)
-            }
-        } else {
-            elements = try doc.select(chapterListRule)
-        }
-        
+        let elements = try LegadoRuleParser.selectElements(html: html, rule: chapterListRule, baseURL: baseURL)
+
         var chapters: [BookChapter] = []
         var index = 0
         
@@ -2283,38 +2226,11 @@ class BookSourceEngine {
 
     // 解析相对URL（补全协议和域名）
     private func resolveUrl(_ urlString: String, baseUrl: String) -> String {
-        let trimmedUrl = urlString.trimmingCharacters(in: .whitespaces)
-        let trimmedBase = baseUrl.trimmingCharacters(in: .whitespaces)
-        
-        print("🔗 [resolveUrl] 输入: url=\(trimmedUrl), baseUrl=\(trimmedBase)")
-        
-        // 如果已经是完整URL，直接返回
-        if trimmedUrl.hasPrefix("http://") || trimmedUrl.hasPrefix("https://") {
-            print("🔗 [resolveUrl] 已是完整URL，直接返回")
-            return trimmedUrl
-        }
-        
-        // 解析基础URL
-        guard let base = URL(string: trimmedBase) else {
-            print("❌ resolveUrl: 无法解析 baseUrl=\(trimmedBase)")
-            return trimmedUrl
-        }
-        
-        // 如果是相对路径，组合基础URL
-        if trimmedUrl.hasPrefix("/") {
-            // 绝对路径（相对于域名根目录）
-            if let scheme = base.scheme, let host = base.host {
-                let port = base.port.map { ":\($0)" } ?? ""
-                return "\(scheme)://\(host)\(port)\(trimmedUrl)"
-            }
-        } else {
-            // 相对路径（相对于当前目录）
-            if let resolved = URL(string: trimmedUrl, relativeTo: base) {
-                return resolved.absoluteString
-            }
-        }
-        
-        return trimmedUrl
+        let value = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return "" }
+        guard let base = URL(string: baseUrl.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let resolved = URL(string: value, relativeTo: base) else { return value }
+        return resolved.absoluteURL.absoluteString
     }
     
     // 检查规则是否包含JavaScript代码

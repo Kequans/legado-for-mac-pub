@@ -18,3 +18,5 @@ swift build
 - BookSourceSearchAndImport.md：书源搜索取消、书籍信息回填和 `@put/@get` 规则回归检查。
 
 历史脚本中的绝对路径和旧日志仅用于追溯，新增测试应使用仓库相对路径。
+
+运行 `bash Tests/Manual/run_dom_regression.sh` 验证 Android DOM 规则兼容性（11 项离线断言，不依赖 XCTest）。

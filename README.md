@@ -20,6 +20,8 @@ Legado for macOS 是基于 SwiftUI 的原生阅读器，目标是把 Android 版
 
 依赖 Android WebView、Java 类（例如 OkHttp）、登录 UI、音频/图片书专用渲染和 iCloud 同步的功能仍属于兼容边界。
 
+书源解析的已修复差异和兼容边界见 [Android 解析兼容性核对](Docs/Reference/AndroidParserCompatibility.md)。
+
 ## 界面预览
 
 界面采用 macOS 原生深色布局，覆盖书架、书源、订阅、阅读和项目介绍等主要使用场景。图片按两列排列，GitHub 页面会根据屏幕宽度自动缩放。

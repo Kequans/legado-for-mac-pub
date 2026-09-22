@@ -11,9 +11,22 @@ struct ReleaseNote: Identifiable {
 }
 
 enum AppReleaseInfo {
-    static let currentVersion = "2.0.0"
+    static let currentVersion = "2.0.1"
 
     static let notes: [ReleaseNote] = [
+        ReleaseNote(
+            version: "2.0.1",
+            date: "2026-09-22",
+            title: "书源解析兼容性修复",
+            summary: "对照 Android Legado 修复基础规则差异，改善书籍信息和章节目录的解析。",
+            changes: [
+                "修复属性选择器被误判为索引，导致书名、作者等信息为空的问题。",
+                "保留当前节点和原始属性值，修复链接丢失及普通字段被错误转换为网址的问题。",
+                "修复多个父节点下的索引选择，完善目录列表合并、交错和备用规则处理。",
+                "统一搜索和目录的 HTML 规则解析，修复字符串列表重复提取的问题。",
+                "修复空链接及省略协议的链接处理，新增 11 项离线规则回归验证。"
+            ]
+        ),
         ReleaseNote(
             version: "2.0.0",
             date: "2026-09-19",

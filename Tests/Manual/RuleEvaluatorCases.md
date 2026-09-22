@@ -7,7 +7,7 @@
 | JSOUP 链式选择 | class.book.0@tag.a@text | 取得第一本书的标题 |
 | 负索引 | class.book[-1]@tag.a@href | 取得最后一本书的链接 |
 | 排除索引 | tag.li[!0]@text | 排除第一个元素 |
-| 区间索引 | tag.li[0:2]@text | 取得前两个元素 |
+| 区间索引 | tag.li[0:2]@text | 取得索引 0、1、2 的三个元素（JSoup 区间包含终点） |
 | 连接符 | a@text||h1@text | 使用第一个非空结果 |
 | 递归 JSONPath | $..books[*] | 找到嵌套任意层级的 books 数组 |
 | XPath 属性 | //*[@id="content"]//a[1]/@href | 取得首个链接属性 |
