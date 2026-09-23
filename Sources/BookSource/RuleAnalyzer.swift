@@ -81,12 +81,12 @@ class RuleAnalyzer {
         let trimmed = rule.trimmingCharacters(in: .whitespacesAndNewlines)
         
         // XPath: 以 / 开头或者有 @XPath: 前缀
-        if trimmed.hasPrefix("/") || trimmed.hasPrefix("@XPath:") {
+        if trimmed.hasPrefix("/") || trimmed.lowercased().hasPrefix("@xpath:") {
             return .xpath
         }
         
         // JSON: 以 $. 或 $[ 开头或者有 @Json: 前缀
-        if trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[") || trimmed.hasPrefix("@Json:") {
+        if trimmed.hasPrefix("$.") || trimmed.hasPrefix("$[") || trimmed.lowercased().hasPrefix("@json:") {
             return .json
         }
         

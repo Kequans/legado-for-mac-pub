@@ -161,7 +161,7 @@ class RegexCleaner {
     /// - Parameter rule: 完整规则
     /// - Returns: (主规则, 净化表达式数组)
     static func extractCleanRules(from rule: String) -> (mainRule: String, cleanRules: [(pattern: String, replacement: String)]) {
-        let parts = rule.components(separatedBy: "##")
+        let parts = RuleTemplate.splitClean(rule)
 
         guard parts.count >= 2 else {
             return (rule, [])

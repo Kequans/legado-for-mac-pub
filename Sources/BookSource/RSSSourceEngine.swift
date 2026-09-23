@@ -3,11 +3,10 @@ import SwiftSoup
 
 /// 订阅源解析引擎
 class RSSSourceEngine {
-    private let jsEngine: JavaScriptEngine
+    private var jsEngine: JavaScriptEngine { JavaScriptEngine.shared }
     private let bookSourceEngine: BookSourceEngine
 
     init() {
-        self.jsEngine = JavaScriptEngine.shared
         self.bookSourceEngine = BookSourceEngine.shared
     }
 
@@ -15,6 +14,10 @@ class RSSSourceEngine {
 
     /// 解析订阅源，返回文章列表
     func parse(source: RSSSource) async throws -> [Article] {
+        try await JavaScriptEngine.withScope { try await self.parseImpl(source: source) }
+    }
+
+    private func parseImpl(source: RSSSource) async throws -> [Article] {
         print("📰 开始解析订阅源: \(source.sourceName)")
 
         // 1. 检查是否是标准RSS

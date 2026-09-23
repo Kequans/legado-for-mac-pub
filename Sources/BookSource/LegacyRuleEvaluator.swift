@@ -107,45 +107,11 @@ final class LegacyRuleEvaluator {
     }
 
     static func xpathValue(html: String, rule: String, baseURL: String = "") throws -> String {
-        let document = try SwiftSoup.parse(html, baseURL)
-        let cleaned = cleanXPath(rule)
-        if cleaned.hasSuffix("/text()") {
-            let elements = try xpathElements(in: document, rule: String(cleaned.dropLast(7)))
-            return try elements.map { try $0.text() }.joined(separator: "\n")
-        }
-        if let range = cleaned.range(of: "/@", options: .backwards) {
-            let elements = try xpathElements(in: document, rule: String(cleaned[..<range.lowerBound]))
-            let attribute = String(cleaned[range.upperBound...])
-            return try elements.compactMap { value in
-                let result = try value.attr(attribute)
-                return result.isEmpty ? nil : result
-            }.joined(separator: "\n")
-        }
-        let elements = try xpathElements(in: document, rule: cleaned)
-        return try elements.map { try $0.text() }.joined(separator: "\n")
+        try XPathRuleEvaluator.values(html: html, rule: rule).joined(separator: "\n")
     }
 
     static func xpathElements(in root: Element, rule: String) throws -> [Element] {
-        let cleaned = cleanXPath(rule)
-        let steps = xpathSteps(cleaned)
-        guard !steps.isEmpty else { return [] }
-        var current: [Element] = [root]
-
-        for step in steps {
-            if step.name == "text()" || step.name.hasPrefix("@") { break }
-            var next: [Element] = []
-            for element in current {
-                let candidates: Elements
-                if step.name == "*" {
-                    candidates = try element.select("*")
-                } else {
-                    candidates = try element.select(step.name)
-                }
-                next.append(contentsOf: applyXPathPredicate(candidates, step.predicate))
-            }
-            current = next
-        }
-        return current
+        try XPathRuleEvaluator.elements(html: root.outerHtml(), rule: rule)
     }
 
     // MARK: - Selection

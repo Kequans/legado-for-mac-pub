@@ -12,6 +12,36 @@ final class LegadoRuleParser {
     ]
 
     static func value(in element: Element, rule: String, baseURL: String = "", jsLib: String? = nil) throws -> String {
+        if rule.hasPrefix("@get:{"), let end = rule.firstIndex(of: "}") {
+            let key = String(rule[rule.index(rule.startIndex, offsetBy: 6)..<end])
+            let result = JavaScriptEngine.shared.getVariable(key)
+            let suffix = String(rule[rule.index(after: end)...])
+            return applyCleanRules(result, cleanRules: RegexCleaner.extractCleanRules(from: suffix).cleanRules)
+        }
+        if let put = rule.range(of: "@put:"), let end = rule[put.upperBound...].firstIndex(of: "}") {
+            let object = String(rule[put.upperBound...end])
+            let fields = try JavaScriptEngine.shared.evaluate("(" + object + ")").toDictionary() ?? [:]
+            for (key, nested) in fields {
+                guard let key = key as? String, let nested = nested as? String else { continue }
+                JavaScriptEngine.shared.putVariable(key, value: try value(in: element, rule: nested, baseURL: baseURL, jsLib: jsLib))
+            }
+            let remaining = String(rule[..<put.lowerBound]) + rule[rule.index(after: end)...]
+            return remaining.isEmpty ? "" : try value(in: element, rule: remaining, baseURL: baseURL, jsLib: jsLib)
+        }
+        if rule.contains("{{") {
+            let parts = RuleTemplate.splitClean(rule)
+            let expanded = try RuleTemplate.expand(parts[0]) { expression in
+                if expression.hasPrefix("@") {
+                    let nested = expression.hasPrefix("@js:") || expression.lowercased().hasPrefix("@xpath:") || expression.lowercased().hasPrefix("@json:")
+                        ? expression : String(expression.dropFirst())
+                    return try value(in: element, rule: nested, baseURL: baseURL, jsLib: jsLib)
+                }
+                return try JavaScriptEngine.shared.evaluateRule(expression,
+                    variables: ["result": try element.outerHtml(), "baseUrl": baseURL], jsLib: jsLib)
+            }
+            let cleans = RegexCleaner.extractCleanRules(from: parts.dropFirst().isEmpty ? "" : "##" + parts.dropFirst().joined(separator: "##")).cleanRules
+            return applyCleanRules(expanded, cleanRules: cleans)
+        }
         let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: rule)
         let segments = RuleAnalyzer.splitRule(mainRule)
         if segments.count == 1, let segment = segments.first, segment.mode == .default {
@@ -70,22 +100,41 @@ final class LegadoRuleParser {
     }
 
     static func value(html: String, rule: String, baseURL: String = "", jsLib: String? = nil) throws -> String {
+        let raw = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        if rule.contains("{{"), raw.hasPrefix("{") || raw.hasPrefix("[") {
+            let parts = RuleTemplate.splitClean(rule)
+            let expanded = try RuleTemplate.expand(parts[0]) { expression in
+                if expression.hasPrefix("$.") || expression.hasPrefix("$[") || expression.lowercased().hasPrefix("@json:") {
+                    return try jsonValue(from: html, rule: expression)
+                }
+                return try JavaScriptEngine.shared.evaluateRule(expression,
+                    variables: ["result": html, "baseUrl": baseURL], jsLib: jsLib)
+            }
+            return applyCleanRules(expanded, cleanRules: RegexCleaner.extractCleanRules(from: "##" + parts.dropFirst().joined(separator: "##")).cleanRules)
+        }
         let document = try SwiftSoup.parse(html, baseURL)
         return try value(in: document, rule: rule, baseURL: baseURL, jsLib: jsLib)
     }
 
     static func values(html: String, rule: String, baseURL: String = "", jsLib: String? = nil) throws -> [String] {
         let cleanRule = rule.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isJSONRule(cleanRule) {
-            let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: cleanRule)
-            if let objects = try? jsonValues(from: html, rule: mainRule) {
-                return objects.map { applyCleanRules(stringify($0), cleanRules: cleanRules) }
-            }
+        if cleanRule.hasPrefix("/") || cleanRule.lowercased().hasPrefix("@xpath:") {
+            let (main, cleans) = RegexCleaner.extractCleanRules(from: cleanRule)
+            return try XPathRuleEvaluator.values(html: html, rule: main).map { applyCleanRules($0, cleanRules: cleans) }
+        }
+        if isJavaScriptRule(cleanRule) {
+            var script = cleanRule
+            if script.hasPrefix("@js:") { script = String(script.dropFirst(4)) }
+            else if script.hasPrefix("<js>"), script.hasSuffix("</js>") { script = String(script.dropFirst(4).dropLast(5)) }
+            return try JavaScriptEngine.shared.evaluateRuleForArray(script,
+                variables: ["result": html, "html": html, "baseUrl": baseURL], jsLib: jsLib)
+                .filter { !$0.isEmpty }
         }
 
-        if isJavaScriptRule(cleanRule) {
-            let result = try JavaScriptEngine.shared.parseJSRule(cleanRule, html: html, baseUrl: baseURL, jsLib: jsLib)
-            return result.isEmpty ? [] : [result]
+        if isJSONRule(cleanRule) || html.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") || html.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("[") {
+            let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: cleanRule)
+            let objects = try jsonValues(from: html, rule: mainRule)
+            return objects.map { applyCleanRules(stringify($0), cleanRules: cleanRules) }
         }
 
         let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: cleanRule)
@@ -122,8 +171,8 @@ final class LegadoRuleParser {
         guard let data = html.data(using: .utf8) else { throw BookSourceError.parseError }
         let object = try JSONSerialization.jsonObject(with: data)
         let (mainRule, cleanRules) = RegexCleaner.extractCleanRules(from: rule)
-        guard let value = try jsonValues(from: object, rule: mainRule).first else { return "" }
-        return applyCleanRules(stringify(value), cleanRules: cleanRules)
+        let values = try jsonValues(from: object, rule: mainRule)
+        return applyCleanRules(values.map(stringify).joined(separator: "\n"), cleanRules: cleanRules)
     }
 
     static func jsonDictionary(from html: String, rule: String) throws -> [String: Any]? {
@@ -151,7 +200,12 @@ final class LegadoRuleParser {
     private static func jsonValues(from object: Any, rule: String) throws -> [Any] {
         let connection = splitConnector(rule)
         if connection.parts.count > 1, let connector = connection.connector {
-            let groups = try connection.parts.map { try jsonValues(from: object, rule: $0) }
+            var groups: [[Any]] = []
+            for part in connection.parts {
+                let result = try jsonValues(from: object, rule: part)
+                if connector == .or, !result.isEmpty { return result }
+                groups.append(result)
+            }
             switch connector {
             case .and:
                 return groups.flatMap { $0 }
@@ -168,96 +222,7 @@ final class LegadoRuleParser {
                 return result
             }
         }
-        let path = cleanRulePrefix(rule, mode: .json)
-        let tokens = pathTokens(path)
-        var values: [Any] = [object]
-
-        for token in tokens {
-            values = values.flatMap { descend($0, token: token) }
-            if values.isEmpty { break }
-        }
-        return values
-    }
-
-    private static func pathTokens(_ path: String) -> [String] {
-        var path = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        if path.hasPrefix("@Json:") { path = String(path.dropFirst(6)) }
-        if path.hasPrefix("@json:") { path = String(path.dropFirst(6)) }
-        var recursive = false
-        if path.hasPrefix("$..") {
-            recursive = true
-            path = String(path.dropFirst(3))
-        } else if path.hasPrefix("$") {
-            path = String(path.dropFirst())
-        }
-
-        var tokens: [String] = []
-        var current = ""
-        var bracketDepth = 0
-        for character in path {
-            if character == "." && bracketDepth == 0 {
-                if !current.isEmpty { tokens.append(current) }
-                current = ""
-            } else {
-                if character == "[" { bracketDepth += 1 }
-                if character == "]" { bracketDepth = max(0, bracketDepth - 1) }
-                current.append(character)
-            }
-        }
-        if !current.isEmpty { tokens.append(current) }
-        let expanded = tokens.flatMap { token in
-            guard token.contains("[") else { return [token] }
-            var result: [String] = []
-            var head = token
-            while let start = head.firstIndex(of: "[") {
-                let prefix = String(head[..<start])
-                if !prefix.isEmpty { result.append(prefix) }
-                guard let end = head.firstIndex(of: "]") else { break }
-                result.append(String(head[head.index(after: start)..<end]))
-                head = String(head[head.index(after: end)...])
-            }
-            if !head.isEmpty { result.append(head) }
-            return result
-        }
-        return recursive ? ["**"] + expanded : expanded
-    }
-
-    private static func descend(_ value: Any, token: String) -> [Any] {
-        if token == "**" {
-            return recursiveValues(value)
-        }
-        if let dictionary = value as? [String: Any] {
-            if token == "*" { return Array(dictionary.values) }
-            if let result = dictionary[token] { return [result] }
-            return []
-        }
-
-        if let array = value as? [Any] {
-            if token == "*" { return array }
-            if token.hasPrefix(":") {
-                let count = Int(token.dropFirst()) ?? array.count
-                return Array(array.prefix(max(0, count)))
-            }
-            if let index = Int(token) {
-                let normalized = index < 0 ? array.count + index : index
-                return normalized >= 0 && normalized < array.count ? [array[normalized]] : []
-            }
-        }
-        return []
-    }
-
-    private static func recursiveValues(_ value: Any) -> [Any] {
-        var values: [Any] = [value]
-        if let dictionary = value as? [String: Any] {
-            for child in dictionary.values {
-                values.append(contentsOf: recursiveValues(child))
-            }
-        } else if let array = value as? [Any] {
-            for child in array {
-                values.append(contentsOf: recursiveValues(child))
-            }
-        }
-        return values
+        return try JSONPathEvaluator.values(object, path: cleanRulePrefix(rule, mode: .json))
     }
 
     private static func stringify(_ value: Any) -> String {

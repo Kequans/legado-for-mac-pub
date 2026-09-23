@@ -4,7 +4,31 @@ import CryptoKit
 
 /// JavaScript执行引擎，用于支持书源中的JS规则
 class JavaScriptEngine {
-    static let shared = JavaScriptEngine()
+    @TaskLocal static var current: JavaScriptEngine?
+    static var shared: JavaScriptEngine { current ?? JavaScriptEngine() }
+
+    static func withScope<T>(seed: String? = nil, bindings: [String: Any] = [:],
+                             network: NetworkManager = .shared, headers: [String: String] = [:],
+                             operation: () async throws -> T) async rethrows -> T {
+        let engine = JavaScriptEngine()
+        if let seed, let data = seed.data(using: .utf8),
+           let values = try? JSONDecoder().decode([String: String].self, from: data) { engine.cache = values }
+        engine.bindings = bindings
+        engine.network = network
+        engine.requestHeaders = headers
+        return try await $current.withValue(engine, operation: operation)
+    }
+
+    func putVariable(_ key: String, value: String) { cache[key] = value }
+    func getVariable(_ key: String) -> String { cache[key] ?? "" }
+
+    var savedVariables: String? {
+        guard let data = try? JSONEncoder().encode(cache) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    private var bindings: [String: Any] = [:]
+    private var network: NetworkManager = .shared
+    private var requestHeaders: [String: String] = [:]
     
     private var context: JSContext
     private var cache: [String: String] = [:] // 全局缓存，用于java.put/get
@@ -95,116 +119,38 @@ class JavaScriptEngine {
         java.md5Encode16 = function(value) { return md5(value).substring(8, 24); };
         java.base64Encode = base64Encode;
         java.base64Decode = base64Decode;
-        """)
-        
-        // 正则匹配
-        context.evaluateScript("""
-        String.prototype.match = function(pattern) {
-            var regex = new RegExp(pattern);
-            return this.toString().match(regex);
+        java.timeFormat = function(ms) {
+            var d = new Date(Number(ms));
+            function pad(n) { return ('0' + n).slice(-2); }
+            return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+                ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
         };
         """)
+
     }
-    
+
     /// 设置网络请求函数
     private func setupNetworkFunctions() {
-        // _fetch 同步网络请求，返回带有body()方法的对象
         let fetch: @convention(block) (String) -> JSValue = { [weak self] url in
-            guard let self = self else {
-                return JSValue(undefinedIn: self?.context)
+            guard let self else { return JSValue() }
+            do { return self.makeResponse(try self.fetchSynchronously([url]).first ?? "") }
+            catch {
+                self.context.exception = JSValue(newErrorFromMessage: error.localizedDescription, in: self.context)
+                return JSValue(undefinedIn: self.context)
             }
-            
-            var result = ""
-            let semaphore = DispatchSemaphore(value: 0)
-            
-            Task {
-                do {
-                    result = try await NetworkManager.shared.get(url: url)
-                } catch {
-                    print("网络请求失败: \(error)")
-                }
-                semaphore.signal()
-            }
-            
-            semaphore.wait()
-
-            // 创建带有body()方法的响应对象
-            let responseObj = self.context.objectForKeyedSubscript("Object").invokeMethod("create", withArguments: [NSNull()])!
-            let bodyFunc: @convention(block) () -> String = {
-                return result
-            }
-            responseObj.setObject(bodyFunc, forKeyedSubscript: "body" as NSString)
-            responseObj.setObject(result, forKeyedSubscript: "_body" as NSString)
-
-            // 添加toString方法，返回body内容（兼容JSON.parse(java.ajax(url))的错误用法）
-            let toStringFunc: @convention(block) () -> String = {
-                return result
-            }
-            responseObj.setObject(toStringFunc, forKeyedSubscript: "toString" as NSString)
-
-            return responseObj
         }
         context.setObject(fetch, forKeyedSubscript: "_fetch" as NSString)
-        
-        // _fetchAll 批量同步网络请求
-        let fetchAll: @convention(block) (JSValue) -> JSValue = { [weak self] urlsValue in
-            guard let self = self else {
-                return JSValue(undefinedIn: self?.context)
+        let fetchAll: @convention(block) (JSValue) -> JSValue = { [weak self] urls in
+            guard let self else { return JSValue() }
+            do {
+                return JSValue(object: try self.fetchSynchronously(urls.toArray() as? [String] ?? []).map(self.makeResponse), in: self.context)
+            } catch {
+                self.context.exception = JSValue(newErrorFromMessage: error.localizedDescription, in: self.context)
+                return JSValue(undefinedIn: self.context)
             }
-
-            let urls = urlsValue.toArray() as? [String] ?? []
-            var resultTexts: [String] = []
-            let semaphore = DispatchSemaphore(value: 0)
-
-            // 使用Task.detached避免在主线程上阻塞
-            Task.detached {
-                await withTaskGroup(of: (Int, String).self) { group in
-                    for (index, url) in urls.enumerated() {
-                        group.addTask {
-                            do {
-                                let result = try await NetworkManager.shared.get(url: url)
-                                return (index, result)
-                            } catch {
-                                print("批量网络请求失败 (\(url)): \(error)")
-                                return (index, "")
-                            }
-                        }
-                    }
-
-                    // 收集结果，保持顺序
-                    var tempResults: [(Int, String)] = []
-                    for await result in group {
-                        tempResults.append(result)
-                    }
-
-                    // 按索引排序
-                    tempResults.sort { $0.0 < $1.0 }
-
-                    // 只在线程安全的 Swift 值中传递结果；JSValue 必须回到
-                    // 调用 JavaScript 的线程后再创建。
-                    resultTexts = tempResults.map { $0.1 }
-                }
-
-                semaphore.signal()
-            }
-
-            semaphore.wait()
-
-            var responses: [JSValue] = []
-            for resultText in resultTexts {
-                let responseObj = self.context.objectForKeyedSubscript("Object").invokeMethod("create", withArguments: [NSNull()])!
-                let bodyFunc: @convention(block) () -> String = { resultText }
-                responseObj.setObject(bodyFunc, forKeyedSubscript: "body" as NSString)
-                responseObj.setObject(resultText, forKeyedSubscript: "_body" as NSString)
-                let toStringFunc: @convention(block) () -> String = { resultText }
-                responseObj.setObject(toStringFunc, forKeyedSubscript: "toString" as NSString)
-                responses.append(responseObj)
-            }
-
-            return JSValue(object: responses, in: self.context)
         }
         context.setObject(fetchAll, forKeyedSubscript: "_fetchAll" as NSString)
-        
+
         // _putCache - 使用self.cache
         let putCache: @convention(block) (String, String) -> Void = { [weak self] key, value in
             self?.cache[key] = value
@@ -239,6 +185,49 @@ class JavaScriptEngine {
         context.setObject(removeCache, forKeyedSubscript: "_removeCache" as NSString)
     }
     
+    private func makeResponse(_ text: String) -> JSValue {
+        let object = JSValue(newObjectIn: context)!
+        let body: @convention(block) () -> String = { text }
+        object.setObject(body, forKeyedSubscript: "body" as NSString)
+        object.setObject(body, forKeyedSubscript: "toString" as NSString)
+        return object
+    }
+
+    private final class FetchResult: @unchecked Sendable {
+        let lock = NSLock()
+        private var result: Result<[String], Error>?
+        func set(_ value: Result<[String], Error>) { lock.lock(); defer { lock.unlock() }; result = value }
+        func get() -> Result<[String], Error>? { lock.lock(); defer { lock.unlock() }; return result }
+    }
+
+    private func fetchSynchronously(_ urls: [String]) throws -> [String] {
+        try Task.checkCancellation()
+        let box = FetchResult()
+        let base = context.objectForKeyedSubscript("baseUrl")?.toString() ?? ""
+        let requests = try urls.map { try SourceRequest.parse($0, baseURL: base.isEmpty ? $0 : base, headers: requestHeaders) }
+        let network = self.network
+        let signal = DispatchSemaphore(value: 0)
+        // 不继承解析器的 JSContext；工作任务只返回 Swift 值。
+        let task = Task.detached {
+            do {
+                var values: [String] = []
+                for request in requests {
+                    try Task.checkCancellation()
+                    values.append(try await network.fetch(request).text)
+                }
+                box.set(.success(values))
+            } catch { box.set(.failure(error)) }
+            signal.signal()
+        }
+        let deadline = Date().addingTimeInterval(120)
+        while signal.wait(timeout: .now() + 0.05) == .timedOut {
+            if Task.isCancelled { task.cancel(); throw CancellationError() }
+            if Date() >= deadline { task.cancel(); throw URLError(.timedOut) }
+        }
+        try Task.checkCancellation()
+        return try box.get()!.get()
+    }
+
     /// 执行JavaScript代码
     /// - Parameters:
     ///   - script: JS代码
@@ -246,7 +235,12 @@ class JavaScriptEngine {
     ///   - jsLib: 书源自定义JS库代码
     /// - Returns: 执行结果
     func evaluate(_ script: String, variables: [String: Any] = [:], jsLib: String? = nil) throws -> JSValue {
-        // 使用共享context以保持cache
+        try Task.checkCancellation()
+        if script.contains("JavaImporter") || script.contains("Packages.") || script.contains("importClass(") {
+            throw BookSourceError.unsupportedJavaScriptInRule
+        }
+        let variables = bindings.merging(variables) { _, new in new }
+        // 每个解析操作使用独立 JSContext；put/get 通过模型 variable 跨阶段传递。
         let localContext = self.context
 
         // JSContext 会保留上一次异常；每次执行前清理，避免把旧错误误判为本次错误。
@@ -322,6 +316,29 @@ class JavaScriptEngine {
             }
         }
         
+        // java.getString/getStringList 是针对当前规则内容取值，不是 java.get 的别名。
+        let input: String
+        if let text = variables["result"] as? String { input = text }
+        else if let object = variables["result"], JSONSerialization.isValidJSONObject(object),
+                let data = try? JSONSerialization.data(withJSONObject: object) {
+            input = String(data: data, encoding: .utf8) ?? ""
+        } else { input = "" }
+        let baseURL = variables["baseUrl"] as? String ?? ""
+        let getString: @convention(block) (String) -> String = { rule in
+            if input.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") || input.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("[") {
+                return (try? LegadoRuleParser.jsonValue(from: input, rule: rule)) ?? ""
+            }
+            return (try? LegadoRuleParser.value(html: input, rule: rule, baseURL: baseURL)) ?? ""
+        }
+        let getStrings: @convention(block) (String) -> [String] = { rule in
+            (try? LegadoRuleParser.values(html: input, rule: rule, baseURL: baseURL)) ?? []
+        }
+        localContext.objectForKeyedSubscript("java").setObject(getString, forKeyedSubscript: "getString" as NSString)
+        localContext.objectForKeyedSubscript("java").setObject(getStrings, forKeyedSubscript: "getStringList" as NSString)
+        if let source = localContext.objectForKeyedSubscript("source"), !source.isUndefined {
+            localContext.evaluateScript("source.getKey = function() { return this.bookSourceUrl; };")
+        }
+
         // 执行脚本
         guard let result = localContext.evaluateScript(wrappedScript) else {
             // 清理临时变量
@@ -342,6 +359,7 @@ class JavaScriptEngine {
         // 清理临时变量
         localContext.setObject(JSValue(undefinedIn: localContext), forKeyedSubscript: "_currentVariables" as NSString)
 
+        try Task.checkCancellation()
         return result
     }
     
@@ -416,8 +434,8 @@ class JavaScriptEngine {
     }
     
     /// 执行JavaScript规则并返回数组结果
-    func evaluateRuleForArray(_ rule: String, variables: [String: Any] = [:]) throws -> [String] {
-        let result = try evaluate(rule, variables: variables)
+    func evaluateRuleForArray(_ rule: String, variables: [String: Any] = [:], jsLib: String? = nil) throws -> [String] {
+        let result = try evaluate(rule, variables: variables, jsLib: jsLib)
         
         if result.isArray {
             var array: [String] = []

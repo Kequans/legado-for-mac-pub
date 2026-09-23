@@ -6,142 +6,35 @@ import JavaScriptCore
 class BookSourceEngine {
     static let shared = BookSourceEngine()
     
-    private init() {}
+    private let network: NetworkManager
+    init(network: NetworkManager = .shared) { self.network = network }
+
+    private func request(_ raw: String, baseURL: String, source: BookSource, keyword: String? = nil) throws -> SourceRequest {
+        try SourceRequest.parse(raw, baseURL: baseURL, headers: parseHeaders(source.header) ?? [:],
+                                keyword: keyword, jsLib: source.jsLib)
+    }
     
+    private static func jsObject<T: Encodable>(_ value: T) -> [String: Any] {
+        guard let data = try? JSONEncoder().encode(value),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return object
+    }
+
     // 搜索书籍
     func search(keyword: String, bookSource: BookSource) async throws -> [SearchBook] {
+        return try await JavaScriptEngine.withScope(seed: nil, bindings: ["source": ["bookSourceUrl": bookSource.bookSourceUrl, "bookSourceName": bookSource.bookSourceName]], network: network, headers: parseHeaders(bookSource.header) ?? [:]) {
+            var value = try await self.searchImpl(keyword: keyword, bookSource: bookSource)
+            for index in value.indices where value[index].variable == nil { value[index].variable = JavaScriptEngine.shared.savedVariables }
+            return value
+        }
+    }
+
+    private func searchImpl(keyword: String, bookSource: BookSource) async throws -> [SearchBook] {
+        guard let searchURL = bookSource.searchUrl else { throw BookSourceError.noSearchUrl }
+        let response = try await network.fetch(request(searchURL, baseURL: bookSource.bookSourceUrl, source: bookSource, keyword: keyword))
         try Task.checkCancellation()
-        guard let searchUrl = bookSource.searchUrl else {
-            throw BookSourceError.noSearchUrl
-        }
-        
-        print("🔍 搜索调试信息:")
-        print("  书源: \(bookSource.bookSourceName)")
-        print("  baseUrl: \(bookSource.bookSourceUrl)")
-        print("  searchUrl原始: \(searchUrl)")
-        
-        // 解析URL和请求配置（支持逗号分隔的格式）
-        // 查找 ",{" 或 ",[" 的组合位置（URL和配置的分隔符）
-        var urlPart = searchUrl
-        var requestConfig: [String: Any]?
-        
-        // 从后往前找 ",{" 或 ",["
-        if let range = searchUrl.range(of: ",\\s*[\\{\\[]", options: [.regularExpression, .backwards]) {
-            let commaIndex = range.lowerBound
-            let jsonStartIndex = searchUrl.index(after: commaIndex)
-            let potentialJsonPart = String(searchUrl[jsonStartIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            urlPart = String(searchUrl[..<commaIndex])
-            print("  URL部分: \(urlPart)")
-            print("  配置部分: \(potentialJsonPart)")
-            
-            // 尝试解析JSON配置
-            if let configData = potentialJsonPart.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] {
-                requestConfig = json
-                print("  ✅ 解析到请求配置: \(json)")
-            }
-        }
-        
-        // 先处理页码表达式
-        var url = evaluateSimpleExpressions(in: urlPart, page: 1)
-        print("  处理页码后: \(url)")
-        
-        // 替换body中的关键词（如果有配置）
-        if var config = requestConfig {
-            if let body = config["body"] as? String {
-                let replacedBody = body
-                    .replacingOccurrences(of: "{{key}}", with: keyword)
-                    .replacingOccurrences(of: "{key}", with: keyword)
-                config["body"] = replacedBody
-                requestConfig = config
-            }
-        }
-        
-        // 替换URL中的关键词
-        url = url
-            .replacingOccurrences(of: "{{key}}", with: keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword)
-            .replacingOccurrences(of: "{key}", with: keyword.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? keyword)
-        
-        print("  替换关键词后URL: \(url)")
-        
-        // 处理相对URL（补全协议和域名）
-        url = resolveUrl(url, baseUrl: bookSource.bookSourceUrl)
-        
-        print("  最终URL: \(url)")
-        
-        // 发起网络请求
-        let html: String
-        
-        // 合并headers：优先使用searchUrl中的headers配置
-        var finalHeaders = parseHeaders(bookSource.header) ?? [:]
-        if let config = requestConfig, let searchHeaders = config["headers"] as? [String: String] {
-            for (key, value) in searchHeaders {
-                finalHeaders[key] = value
-            }
-            print("  📋 使用searchUrl中的headers: \(searchHeaders)")
-        }
-        
-        if let config = requestConfig, let method = config["method"] as? String, method.uppercased() == "POST" {
-            // 检查是否需要webView
-            if let needWebView = config["webView"] as? Bool, needWebView {
-                print("⚠️ 该书源需要webView支持，将尝试不使用webView直接请求（可能失败）")
-            }
-            
-            // POST请求
-            let body = config["body"] as? String ?? ""
-            print("  📤 使用POST请求")
-            print("  📤 URL: \(url)")
-            print("  📤 Body: \(body)")
-            let bodyData = body.data(using: .utf8)
-            print("  📤 Body Data字节数: \(bodyData?.count ?? 0)")
-            html = try await NetworkManager.shared.post(url: url, body: bodyData, headers: finalHeaders)
-            print("  📥 收到响应，长度: \(html.count) 字符")
-            if html.count < 200 {
-                print("  📥 完整响应: \(html)")
-            } else {
-                print("  📥 响应前200字符: \(String(html.prefix(200)))")
-            }
-        } else {
-            // GET请求
-            print("  🌐 发起GET请求...")
-            print("  📋 实际发送的headers: \(finalHeaders)")
-            print("  📋 headers数量: \(finalHeaders.count)")
-            for (key, value) in finalHeaders {
-                print("     \(key): \(value)")
-            }
-            do {
-                html = try await NetworkManager.shared.get(url: url, headers: finalHeaders)
-                print("  ✅ GET请求成功，收到响应长度: \(html.count) 字符")
-                if html.count < 500 {
-                    print("  📄 完整响应: \(html)")
-                } else {
-                    print("  📄 响应前500字符: \(String(html.prefix(500)))")
-                }
-            } catch {
-                if !Task.isCancelled {
-                    print("  ❌ GET请求失败，错误详情:")
-                    print("     错误类型: \(type(of: error))")
-                    print("     错误描述: \(error.localizedDescription)")
-                    if let urlError = error as? URLError {
-                        print("     URLError代码: \(urlError.code.rawValue)")
-                        print("     URLError原始值: \(urlError.code)")
-                        print("     失败URL: \(urlError.failureURLString ?? "未知")")
-                    }
-                }
-                throw error
-            }
-        }
-        
-        // 解析搜索结果
-        try Task.checkCancellation()
-        do {
-            return try parseSearchResult(html: html, rule: bookSource.ruleSearch, baseUrl: bookSource.bookSourceUrl, bookSource: bookSource, keyword: keyword)
-        } catch {
-            print("❌ 解析搜索结果失败: \(error)")
-            print("   HTML前500字符: \(String(html.prefix(500)))")
-            throw error
-        }
+        return try parseSearchResult(html: response.text, rule: bookSource.ruleSearch,
+            baseUrl: response.url.absoluteString, bookSource: bookSource, keyword: keyword)
     }
 
     /// 将搜索结果中的可靠字段补回详情解析结果，避免书源详情页规则失效时保存空书籍。
@@ -180,6 +73,14 @@ class BookSourceEngine {
 
     /// 获取书源的发现页内容。
     func explore(bookSource: BookSource, screen: String? = nil) async throws -> [SearchBook] {
+        return try await JavaScriptEngine.withScope(seed: nil, bindings: ["source": ["bookSourceUrl": bookSource.bookSourceUrl, "bookSourceName": bookSource.bookSourceName]], network: network, headers: parseHeaders(bookSource.header) ?? [:]) {
+            var value = try await self.exploreImpl(bookSource: bookSource, screen: screen)
+            for index in value.indices where value[index].variable == nil { value[index].variable = JavaScriptEngine.shared.savedVariables }
+            return value
+        }
+    }
+
+    private func exploreImpl(bookSource: BookSource, screen: String? = nil) async throws -> [SearchBook] {
         guard let exploreUrl = bookSource.exploreUrl,
               let exploreRule = bookSource.ruleExplore,
               let listRule = exploreRule.bookList,
@@ -187,8 +88,9 @@ class BookSourceEngine {
             throw BookSourceError.noRule
         }
 
-        let url = resolveUrl(evaluateSimpleExpressions(in: exploreUrl, page: 1), baseUrl: bookSource.bookSourceUrl)
-        let html = try await NetworkManager.shared.get(url: url, headers: parseHeaders(bookSource.header))
+        let response = try await network.fetch(request(exploreUrl, baseURL: bookSource.bookSourceUrl, source: bookSource))
+        let url = response.url.absoluteString
+        let html = response.text
         let rule = SearchRule(
             bookList: listRule,
             name: exploreRule.name,
@@ -210,170 +112,74 @@ class BookSourceEngine {
     }
     
     // 获取书籍信息
-    func getBookInfo(bookUrl: String, bookSource: BookSource) async throws -> Book {
-        let html = try await NetworkManager.shared.get(url: bookUrl, headers: parseHeaders(bookSource.header))
-        
-        return try parseBookInfo(html: html, bookUrl: bookUrl, rule: bookSource.ruleBookInfo, bookSource: bookSource)
+    func getBookInfo(bookUrl: String, bookSource: BookSource, variable: String? = nil) async throws -> Book {
+        return try await JavaScriptEngine.withScope(seed: variable, bindings: ["source": ["bookSourceUrl": bookSource.bookSourceUrl, "bookSourceName": bookSource.bookSourceName]], network: network, headers: parseHeaders(bookSource.header) ?? [:]) {
+            var value = try await self.getBookInfoImpl(bookUrl: bookUrl, bookSource: bookSource)
+            value.variable = JavaScriptEngine.shared.savedVariables
+            return value
+        }
     }
-    
+
+    private func getBookInfoImpl(bookUrl: String, bookSource: BookSource) async throws -> Book {
+        let response = try await network.fetch(request(bookUrl, baseURL: bookSource.bookSourceUrl, source: bookSource))
+        var book = try parseBookInfo(html: response.text, bookUrl: response.url.absoluteString, rule: bookSource.ruleBookInfo, bookSource: bookSource)
+        // 持久化身份保持原始 URL，规则基址使用最终响应地址。
+        book.bookUrl = bookUrl
+        return book
+    }
+
     // 获取章节列表
     func getChapterList(book: Book, bookSource: BookSource) async throws -> [BookChapter] {
-        guard let tocRule = bookSource.ruleToc else { throw BookSourceError.noRule }
-        var currentURL = book.tocUrl.isEmpty ? book.bookUrl : book.tocUrl
-        var visited: Set<String> = []
-        var chapters: [BookChapter] = []
-
-        for _ in 0..<50 {
-            guard !visited.contains(currentURL) else { break }
-            visited.insert(currentURL)
-            let html = try await NetworkManager.shared.get(url: currentURL, headers: parseHeaders(bookSource.header))
-            let page = try parseChapterList(
-                html: html,
-                bookUrl: book.bookUrl,
-                baseURL: currentURL,
-                rule: tocRule,
-                jsLib: bookSource.jsLib
-            )
-            chapters.append(contentsOf: page)
-
-            guard let nextRule = tocRule.nextTocUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !nextRule.isEmpty else { break }
-            let next = try parseNextURL(html: html, rule: nextRule, baseURL: currentURL, jsLib: bookSource.jsLib)
-            guard !next.isEmpty else { break }
-            currentURL = next
+        return try await JavaScriptEngine.withScope(seed: book.variable, bindings: ["source": ["bookSourceUrl": bookSource.bookSourceUrl], "book": Self.jsObject(book)], network: network, headers: parseHeaders(bookSource.header) ?? [:]) {
+            var value = try await self.getChapterListImpl(book: book, bookSource: bookSource)
+            for index in value.indices where value[index].variable == nil { value[index].variable = JavaScriptEngine.shared.savedVariables }
+            return value
         }
+    }
 
+    private func getChapterListImpl(book: Book, bookSource: BookSource) async throws -> [BookChapter] {
+        guard let tocRule = bookSource.ruleToc else { throw BookSourceError.noRule }
+        let first = try request(book.tocUrl.isEmpty ? book.bookUrl : book.tocUrl, baseURL: book.bookUrl, source: bookSource)
+        let fetched = try await SourcePagination.collect(first: first, fetch: network.fetch) { response in
+            let chapters = try self.parseChapterList(html: response.text, bookUrl: book.bookUrl,
+                baseURL: response.url.absoluteString, rule: tocRule, jsLib: bookSource.jsLib)
+            let next = try self.nextRequests(response: response, rule: tocRule.nextTocUrl, source: bookSource)
+            return (chapters, next)
+        }
+        var seen = Set<String>()
+        var chapters = fetched.filter { seen.insert($0.url).inserted }
         for index in chapters.indices { chapters[index].index = index }
         return chapters
     }
-    
+
     // 获取章节内容
     func getChapterContent(chapter: BookChapter, bookSource: BookSource) async throws -> String {
-        print("📖 准备获取章节内容")
-        print("📖 chapter.url: \(chapter.url)")
-        print("📖 chapter.bookUrl: \(chapter.bookUrl)")
-
-        // 从bookUrl中提取bookid（bookUrl是正确的）
-        var actualBookid: String?
-        if let urlComponents = URLComponents(string: chapter.bookUrl),
-           let queryItems = urlComponents.queryItems,
-           let bookidItem = queryItems.first(where: { $0.name == "bookid" }),
-           let bookid = bookidItem.value, bookid != "undefined" {
-            actualBookid = bookid
-            print("📦 从bookUrl提取bookid: \(bookid)")
-            // 保存到JS缓存
-            _ = try? JavaScriptEngine.shared.evaluate("java.put('bookid', '\(bookid)');", variables: [:])
+        return try await JavaScriptEngine.withScope(seed: chapter.variable, bindings: ["source": ["bookSourceUrl": bookSource.bookSourceUrl], "chapter": Self.jsObject(chapter)], network: network, headers: parseHeaders(bookSource.header) ?? [:]) {
+            return try await self.getChapterContentImpl(chapter: chapter, bookSource: bookSource)
         }
+    }
 
-        // 检查chapter.url是否包含undefined，如果是则重新构建URL
-        var finalUrl = chapter.url
-        if finalUrl.contains("bookid=undefined"), let bookid = actualBookid {
-            // 从chapter.url提取itemid
-            if let urlComponents = URLComponents(string: chapter.url),
-               let queryItems = urlComponents.queryItems,
-               let itemidItem = queryItems.first(where: { $0.name == "itemid" }),
-               let itemid = itemidItem.value {
-                // 重新构建正确的URL
-                var components = urlComponents
-                components.queryItems = [
-                    URLQueryItem(name: "bookid", value: bookid),
-                    URLQueryItem(name: "itemid", value: itemid)
-                ]
-                if let newUrl = components.url?.absoluteString {
-                    finalUrl = newUrl
-                    print("✅ 重新构建章节URL: \(finalUrl)")
-                }
-            }
+    private func getChapterContentImpl(chapter: BookChapter, bookSource: BookSource) async throws -> String {
+        guard let contentRule = bookSource.ruleContent else { throw BookSourceError.noRule }
+        if contentRule.webJs?.isEmpty == false || contentRule.sourceRegex?.isEmpty == false {
+            throw SourceRequestError.unsupported("正文 WebView/资源嗅探")
         }
-
-        // 修正章节URL，处理重复路径问题（如 /bqg/1099590//bqg/1099590/xxx.html）
-        if finalUrl.hasPrefix("http") {
-            // 检测并修复重复路径：提取协议后的部分，查找双斜杠后的重复路径
-            if let range = finalUrl.range(of: "://") {
-                let afterProtocol = String(finalUrl[range.upperBound...])
-                // 如果存在双斜杠（非协议部分）
-                if let doubleSlashIndex = afterProtocol.firstIndex(of: "/"),
-                   afterProtocol[doubleSlashIndex...].contains("//") {
-                    // 分割成域名和路径
-                    let components = afterProtocol.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-                    if components.count == 2 {
-                        let domain = components[0]
-                        var path = String(components[1])
-                        
-                        // 清理路径中的连续双斜杠，并检测重复路径段
-                        // 例如 /bqg/1099590//bqg/1099590/xxx.html -> /bqg/1099590/xxx.html
-                        if path.contains("//") {
-                            let pathSegments = path.split(separator: "/", omittingEmptySubsequences: true)
-                            var cleanedSegments: [String] = []
-                            var i = 0
-                            while i < pathSegments.count {
-                                let segment = String(pathSegments[i])
-                                cleanedSegments.append(segment)
-                                
-                                // 检查是否有连续重复的路径段
-                                if i + 1 < pathSegments.count && 
-                                   cleanedSegments.count >= 2 &&
-                                   pathSegments[i + 1] == pathSegments[i - cleanedSegments.count + 1] {
-                                    // 发现重复模式，跳过后续的重复段
-                                    let repeatCount = cleanedSegments.count - 1
-                                    var skip = 0
-                                    for j in 0..<repeatCount {
-                                        if i + 1 + j < pathSegments.count && 
-                                           pathSegments[i + 1 + j] == pathSegments[i - repeatCount + 1 + j] {
-                                            skip += 1
-                                        } else {
-                                            break
-                                        }
-                                    }
-                                    if skip > 0 {
-                                        i += skip
-                                    }
-                                }
-                                i += 1
-                            }
-                            path = cleanedSegments.joined(separator: "/")
-                            let urlProtocol = String(finalUrl[..<range.upperBound])
-                            finalUrl = "\(urlProtocol)\(domain)/\(path)"
-                            print("✅ 修复重复路径: \(finalUrl)")
-                        }
-                    }
-                }
-            }
-        } else {
-            // 相对路径，使用resolveUrl拼接
-            if let base = URL(string: chapter.bookUrl), let url = URL(string: finalUrl, relativeTo: base) {
-                finalUrl = url.absoluteURL.absoluteString
-                print("✅ 章节URL已规范拼接: \(finalUrl)")
-            } else {
-                finalUrl = chapter.bookUrl + finalUrl
-                print("⚠️ 章节URL兜底拼接: \(finalUrl)")
-            }
-        }
-
-        guard let contentRule = bookSource.ruleContent else {
-            throw BookSourceError.noRule
-        }
-
-        var currentURL = finalUrl
-        var visited: Set<String> = []
-        var pages: [String] = []
-        for _ in 0..<30 {
-            guard !visited.contains(currentURL) else { break }
-            visited.insert(currentURL)
-            let html = try await NetworkManager.shared.get(url: currentURL, headers: parseHeaders(bookSource.header))
-            pages.append(try parseContent(html: html, rule: contentRule, jsLib: bookSource.jsLib))
-            guard let nextRule = contentRule.nextContentUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !nextRule.isEmpty else { break }
-            let nextURL = try parseNextURL(
-                html: html,
-                rule: nextRule,
-                baseURL: currentURL,
-                jsLib: bookSource.jsLib
-            )
-            guard !nextURL.isEmpty else { break }
-            currentURL = nextURL
+        let first = try request(chapter.url, baseURL: chapter.bookUrl, source: bookSource)
+        let pages = try await SourcePagination.collect(first: first, fetch: network.fetch) { response in
+            let content = try self.parseContent(html: response.text, rule: contentRule,
+                baseURL: response.url.absoluteString, jsLib: bookSource.jsLib)
+            let next = try self.nextRequests(response: response, rule: contentRule.nextContentUrl, source: bookSource)
+            return ([content], next)
         }
         return pages.joined(separator: "\n")
+    }
+
+    private func nextRequests(response: NetworkManager.Response, rule: String?, source: BookSource) throws -> [SourceRequest] {
+        guard let rule, !rule.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        return try LegadoRuleParser.values(html: response.text, rule: rule,
+            baseURL: response.url.absoluteString, jsLib: source.jsLib)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { try request($0, baseURL: response.url.absoluteString, source: source) }
     }
 
     /// 供 RSS 订阅源和发现页复用的统一规则入口。
@@ -389,24 +195,6 @@ class BookSourceEngine {
         try LegadoRuleParser.selectElements(html: html, rule: rule, baseURL: baseUrl)
     }
 
-    private func parseNextURL(html: String, rule: String, baseURL: String, jsLib: String?) throws -> String {
-        let value: String
-        if containsJavaScript(rule) {
-            value = try JavaScriptEngine.shared.parseJSRule(
-                rule,
-                html: html,
-                baseUrl: baseURL,
-                jsLib: jsLib
-            )
-        } else if html.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") ||
-                    html.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("[") {
-            value = (try? LegadoRuleParser.jsonValue(from: html, rule: rule)) ?? ""
-        } else {
-            value = (try? LegadoRuleParser.value(html: html, rule: rule, baseURL: baseURL, jsLib: jsLib)) ?? ""
-        }
-        return resolveUrl(value, baseUrl: baseURL)
-    }
-    
     // MARK: - 解析方法
     
     // 解析搜索结果
@@ -501,6 +289,7 @@ class BookSourceEngine {
                 
                 // 只添加有效的书籍（至少有书名和URL）
                 if !book.name.isEmpty && !book.bookUrl.isEmpty {
+                    book.variable = JavaScriptEngine.shared.savedVariables
                     books.append(book)
                 }
             } catch {
@@ -849,6 +638,7 @@ class BookSourceEngine {
             book.bookSourceUrl = bookSource.bookSourceUrl
             book.bookSourceName = bookSource.bookSourceName
             
+            book.variable = JavaScriptEngine.shared.savedVariables
             books.append(book)
         }
         
@@ -865,37 +655,11 @@ class BookSourceEngine {
     
     // 替换 Android Legado 常见模板：{{$.field}}、{{field}} 和 {$._id}。
     private func replaceTemplates(in text: String, with jsonObject: [String: Any]) -> String {
-        var result = text
-
-        let pattern = "\\{\\{([^}]+)\\}\\}|\\{(\\$[^}]+)\\}"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return result
-        }
-
-        let nsString = text as NSString
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsString.length))
-
-        // 从后向前替换
-        for match in matches.reversed() {
-            if match.numberOfRanges >= 3 {
-                let fullRange = match.range(at: 0)
-                let fieldRange = match.range(at: 1).location != NSNotFound
-                    ? match.range(at: 1)
-                    : match.range(at: 2)
-                var fieldName = nsString.substring(with: fieldRange)
-                if let separator = fieldName.firstIndex(of: ";") {
-                    fieldName = String(fieldName[..<separator])
-                }
-                fieldName = fieldName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let value = try? LegadoRuleParser.jsonValue(from: jsonObject, rule: fieldName) {
-                    result = (result as NSString).replacingCharacters(in: fullRange, with: value)
-                }
-            }
-        }
-        
-        return result
+        guard text.contains("{{"), let data = try? JSONSerialization.data(withJSONObject: jsonObject),
+              let json = String(data: data, encoding: .utf8) else { return text }
+        return (try? LegadoRuleParser.value(html: json, rule: text)) ?? ""
     }
-    
+
     // 使用JavaScript解析搜索结果
     private func parseSearchResultWithJS(html: String, rule: SearchRule, baseUrl: String, bookSource: BookSource, keyword: String) throws -> [SearchBook] {
         guard let bookListRule = rule.bookList else {
@@ -1117,6 +881,7 @@ class BookSourceEngine {
                     book.bookSourceName = bookSource.bookSourceName
                     
                     if !book.name.isEmpty && !book.bookUrl.isEmpty {
+                        book.variable = JavaScriptEngine.shared.savedVariables
                         books.append(book)
                     }
                 }
@@ -1172,6 +937,7 @@ class BookSourceEngine {
                         book.bookSourceName = bookSource.bookSourceName
                         
                         if !book.name.isEmpty && !book.bookUrl.isEmpty {
+                            book.variable = JavaScriptEngine.shared.savedVariables
                             books.append(book)
                         }
                     }
@@ -1364,12 +1130,12 @@ class BookSourceEngine {
         
         // 解析书名
         if let nameRule = rule.name {
-            name = try parseFieldWithVariables(doc: doc, rule: nameRule, variables: variables, html: html, jsLib: bookSource.jsLib)
+            name = try parseFieldWithVariables(doc: doc, rule: nameRule, variables: variables, html: html, baseURL: bookUrl, jsLib: bookSource.jsLib)
         }
         
         // 解析作者
         if let authorRule = rule.author {
-            author = try parseFieldWithVariables(doc: doc, rule: authorRule, variables: variables, html: html, jsLib: bookSource.jsLib)
+            author = try parseFieldWithVariables(doc: doc, rule: authorRule, variables: variables, html: html, baseURL: bookUrl, jsLib: bookSource.jsLib)
         }
 
         // 部分站点的详情规则会因页面改版失效，但页面仍保留标准 meta/h1 信息。
@@ -1388,21 +1154,21 @@ class BookSourceEngine {
         
         // 解析简介
         if let introRule = rule.intro {
-            book.intro = try parseFieldWithVariables(doc: doc, rule: introRule, variables: variables, html: html, jsLib: bookSource.jsLib)
+            book.intro = try parseFieldWithVariables(doc: doc, rule: introRule, variables: variables, html: html, baseURL: bookUrl, jsLib: bookSource.jsLib)
         }
         
         // 解析封面
         if let coverRule = rule.coverUrl {
-            var coverUrl = try parseFieldWithVariables(doc: doc, rule: coverRule, variables: variables, html: html, jsLib: bookSource.jsLib)
+            var coverUrl = try parseFieldWithVariables(doc: doc, rule: coverRule, variables: variables, html: html, baseURL: bookUrl, jsLib: bookSource.jsLib)
             if !coverUrl.starts(with: "http") && !coverUrl.isEmpty {
-                coverUrl = resolveUrl(coverUrl, baseUrl: bookSource.bookSourceUrl)
+                coverUrl = resolveUrl(coverUrl, baseUrl: bookUrl)
             }
             book.coverUrl = coverUrl
         }
         
         // 解析分类
         if let kindRule = rule.kind {
-            book.kind = try parseFieldWithVariables(doc: doc, rule: kindRule, variables: variables, html: html, jsLib: bookSource.jsLib)
+            book.kind = try parseFieldWithVariables(doc: doc, rule: kindRule, variables: variables, html: html, baseURL: bookUrl, jsLib: bookSource.jsLib)
         }
         
         // 解析目录URL
@@ -1412,6 +1178,7 @@ class BookSourceEngine {
                 rule: tocRule,
                 variables: variables,
                 html: html,
+                baseURL: bookUrl,
                 jsLib: bookSource.jsLib
             )
             let resolvedTocUrl = resolveUrl(tocUrl, baseUrl: bookUrl)
@@ -1482,7 +1249,7 @@ class BookSourceEngine {
         // 解析封面
         if let coverRule = rule.coverUrl {
             var coverUrl = extractJSONValue(from: bookData, rule: coverRule)
-            coverUrl = resolveUrl(coverUrl, baseUrl: bookSource.bookSourceUrl)
+            coverUrl = resolveUrl(coverUrl, baseUrl: bookUrl)
             book.coverUrl = coverUrl
         }
         
@@ -1521,17 +1288,17 @@ class BookSourceEngine {
                     }
                 }
                 
-                book.tocUrl = resolveUrl(tocUrl, baseUrl: bookSource.bookSourceUrl)
+                book.tocUrl = resolveUrl(tocUrl, baseUrl: bookUrl)
             } else {
                 // 检查是否包含模板变量
                 if tocRule.contains("{{") {
                     // 使用模板替换
                     let tocUrl = replaceTemplates(in: tocRule, with: bookData)
-                    book.tocUrl = resolveUrl(tocUrl, baseUrl: bookSource.bookSourceUrl)
+                    book.tocUrl = resolveUrl(tocUrl, baseUrl: bookUrl)
                 } else {
                     // 作为字段名提取
                     let tocUrl = extractJSONValue(from: bookData, rule: tocRule)
-                    book.tocUrl = resolveUrl(tocUrl, baseUrl: bookSource.bookSourceUrl)
+                    book.tocUrl = resolveUrl(tocUrl, baseUrl: bookUrl)
                 }
             }
         } else {
@@ -1619,6 +1386,7 @@ class BookSourceEngine {
                 if let updateRule = rule.updateTime, !updateRule.isEmpty {
                     chapter.tag = try? parseRuleValue(element: element, rule: updateRule, html: html, baseUrl: baseURL)
                 }
+                chapter.variable = JavaScriptEngine.shared.savedVariables
                 chapters.append(chapter)
                 index += 1
             }
@@ -1870,6 +1638,7 @@ class BookSourceEngine {
                 if let updateRule = rule.updateTime, !updateRule.isEmpty {
                     chapter.tag = extractJSONValue(from: chapterData, rule: updateRule)
                 }
+                chapter.variable = JavaScriptEngine.shared.savedVariables
                 chapters.append(chapter)
             }
         }
@@ -1879,7 +1648,7 @@ class BookSourceEngine {
     }
     
     // 解析正文内容
-    private func parseContent(html: String, rule: ContentRule?, jsLib: String? = nil) throws -> String {
+    private func parseContent(html: String, rule: ContentRule?, baseURL: String = "", jsLib: String? = nil) throws -> String {
         guard let rule = rule, let contentRule = rule.content else {
             throw BookSourceError.noRule
         }
@@ -1900,7 +1669,7 @@ class BookSourceEngine {
         
         // 检查是否使用JS规则
         if containsJavaScript(contentRule) {
-            let content = try JavaScriptEngine.shared.parseJSRule(contentRule, html: source, baseUrl: "", jsLib: jsLib)
+            let content = try JavaScriptEngine.shared.parseJSRule(contentRule, html: source, baseUrl: baseURL, jsLib: jsLib)
             
             // 应用替换规则
             if let replaceRegex = rule.replaceRegex {
@@ -1915,7 +1684,7 @@ class BookSourceEngine {
         
         // 使用parseRuleValue处理规则，支持@text/@html等特殊语法
         let dummyElement = try doc.select("html").first()!
-        var content = try parseRuleValue(element: dummyElement, rule: contentRule, html: source, baseUrl: "", jsLib: jsLib)
+        var content = try parseRuleValue(element: dummyElement, rule: contentRule, html: source, baseUrl: baseURL, jsLib: jsLib)
         
         // 如果内容本身是HTML，需要提取纯文本并保留段落结构
         if !contentRule.contains("@text") {
@@ -2246,6 +2015,7 @@ class BookSourceEngine {
 // 搜索书籍结果
 struct SearchBook: Identifiable {
     let id = UUID()
+    var variable: String?
     var name: String = ""
     var author: String = ""
     var bookUrl: String = ""
@@ -2290,6 +2060,7 @@ extension BookSourceEngine {
                     do {
                         let value = try parseRuleValue(element: doc, rule: selector, html: html, baseUrl: "")
                         variables[key] = value
+                        JavaScriptEngine.shared.putVariable(key, value: value)
                         print("  📌 保存变量: \(key) = \(value.prefix(50))")
                     } catch {
                         print("  ⚠️ 解析变量\(key)失败: \(error)")
@@ -2368,7 +2139,7 @@ extension BookSourceEngine {
     }
     
     /// 解析字段，支持@get从变量获取
-    private func parseFieldWithVariables(doc: Document, rule: String, variables: [String: String], html: String, jsLib: String? = nil) throws -> String {
+    private func parseFieldWithVariables(doc: Document, rule: String, variables: [String: String], html: String, baseURL: String = "", jsLib: String? = nil) throws -> String {
         // 检查是否是@get规则
         if rule.hasPrefix("@get:") {
             var varName = String(rule.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2380,119 +2151,14 @@ extension BookSourceEngine {
             if let value = variables[varName] {
                 return value
             }
-            print("  ⚠️ 变量\(varName)未找到")
-            return ""
+            return JavaScriptEngine.shared.getVariable(varName)
         }
 
-        if rule.contains("{{") {
-            return try parseHTMLTemplateRule(
-                rule,
-                document: doc,
-                html: html,
-                baseURL: "",
-                jsLib: jsLib
-            )
-        }
-        
         // 普通CSS选择器
-        return try parseRuleValue(element: doc, rule: rule, html: html, baseUrl: "", jsLib: jsLib)
+        return try parseRuleValue(element: doc, rule: rule, html: html, baseUrl: baseURL, jsLib: jsLib)
     }
 
-    /// 解析 HTML 书籍详情规则中的 {{...}} 模板。
-    ///
-    /// 例如 `🔖 {{@.w_txt li.4@textNodes}}` 中的 `@` 表示从当前文档执行
-    /// CSS/JSoup 规则；字符串拼接模板则交给 JavaScript 兼容层执行。
-    private func parseHTMLTemplateRule(
-        _ rule: String,
-        document: Document,
-        html: String,
-        baseURL: String,
-        jsLib: String?
-    ) throws -> String {
-        let parts = rule.components(separatedBy: "##")
-        let template = parts.first ?? rule
-        let pattern = parts.count >= 3 ? parts[1] : nil
-        let replacement = parts.count >= 3 ? parts.dropFirst(2).joined(separator: "##") : nil
 
-        guard let regex = try? NSRegularExpression(
-            pattern: #"\{\{([\s\S]*?)\}\}"#,
-            options: []
-        ) else {
-            return template
-        }
-
-        var result = template
-        let source = template as NSString
-        let matches = regex.matches(
-            in: template,
-            options: [],
-            range: NSRange(location: 0, length: source.length)
-        )
-
-        for match in matches.reversed() {
-            guard match.numberOfRanges > 1 else { continue }
-            let expression = source.substring(with: match.range(at: 1))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let value = try evaluateHTMLTemplateExpression(
-                expression,
-                document: document,
-                html: html,
-                baseURL: baseURL,
-                jsLib: jsLib
-            )
-            result = (result as NSString).replacingCharacters(in: match.range(at: 0), with: value)
-        }
-
-        if let pattern, let replacement,
-           let cleanRegex = try? NSRegularExpression(pattern: pattern, options: []) {
-            let resultSource = result as NSString
-            result = cleanRegex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: NSRange(location: 0, length: resultSource.length),
-                withTemplate: replacement
-            )
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func evaluateHTMLTemplateExpression(
-        _ expression: String,
-        document: Document,
-        html: String,
-        baseURL: String,
-        jsLib: String?
-    ) throws -> String {
-        if expression.hasPrefix("@") {
-            let selectorRule = String(expression.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
-            return try parseRuleValue(
-                element: document,
-                rule: selectorRule,
-                html: html,
-                baseUrl: baseURL,
-                jsLib: jsLib
-            )
-        }
-
-        if expression.hasPrefix("@js:") || expression.hasPrefix("<js>") {
-            return try JavaScriptEngine.shared.parseJSRule(
-                expression,
-                html: html,
-                baseUrl: baseURL,
-                jsLib: jsLib
-            )
-        }
-
-        // 书源常用的 {{'\\n' + '​'}} 等常量/拼接表达式。
-        if let value = try? JavaScriptEngine.shared.evaluate(expression, variables: [:], jsLib: jsLib),
-           let text = value.toString() {
-            return text
-        }
-
-        // 无法执行的模板保留为空，避免把 {{...}} 当成 CSS 选择器继续解析。
-        return ""
-    }
 }
 
 // 书源错误

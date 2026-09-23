@@ -11,9 +11,23 @@ struct ReleaseNote: Identifiable {
 }
 
 enum AppReleaseInfo {
-    static let currentVersion = "2.0.1"
+    static let currentVersion = "2.0.2"
 
     static let notes: [ReleaseNote] = [
+        ReleaseNote(
+            version: "2.0.2",
+            date: "2026-09-23",
+            title: "书源分页与规则适配增强",
+            summary: "改善多页目录和正文加载，增强请求、模板及查询规则兼容性。",
+            changes: [
+                "支持多个分页链接，增加重复页去重、循环检测和取消处理。",
+                "使用重定向后的页面地址解析相对链接，改善目录和正文链接定位。",
+                "隔离不同解析任务的 JavaScript 状态，支持规则变量跨阶段保存及网络请求取消。",
+                "统一书源请求配置，增强 GET/POST、请求头、编码、重试和 URL 表达式支持。",
+                "增强 HTML/JSON 模板、put/get 变量、XPath 节点查询及 JSONPath 联合、切片和简单过滤。",
+                "对尚不支持的 Android Java/WebView 能力显示明确提示；复杂规则仍存在兼容边界。"
+            ]
+        ),
         ReleaseNote(
             version: "2.0.1",
             date: "2026-09-22",

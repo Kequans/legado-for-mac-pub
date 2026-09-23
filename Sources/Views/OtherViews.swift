@@ -279,7 +279,7 @@ struct DiscoverView: View {
         guard let source = selectedSource else { return }
         Task {
             do {
-                var book = try await BookSourceEngine.shared.getBookInfo(bookUrl: result.bookUrl, bookSource: source)
+                var book = try await BookSourceEngine.shared.getBookInfo(bookUrl: result.bookUrl, bookSource: source, variable: result.variable)
                 BookSourceEngine.shared.mergeSearchResult(result, into: &book, bookSource: source)
                 guard !book.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw BookSourceError.parseError

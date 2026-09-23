@@ -6,7 +6,6 @@ class NetworkManager: NSObject {
     static let shared = NetworkManager()
     
     private var session: URLSession!
-    private var cookieStorage = [String: [HTTPCookie]]()
     
     private override init() {
         super.init()
@@ -55,114 +54,74 @@ class NetworkManager: NSObject {
         session = makeSession()
     }
     
-    // GET 请求
-    func get(url: String, headers: [String: String]? = nil) async throws -> String {
-        guard let requestUrl = URL(string: url) else {
-            throw NetworkError.invalidURL
-        }
-        
-        var request = URLRequest(url: requestUrl)
-        request.httpMethod = "GET"
-        request.timeoutInterval = ReadConfig.shared.requestTimeout
-        
-        // 添加基础headers（模拟真实移动端）
-        request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue("keep-alive", forHTTPHeaderField: "Connection")
-        
-        // 添加请求头
-        if let headers = headers {
-            for (key, value) in headers {
-                request.setValue(value, forHTTPHeaderField: key)
+    struct Response {
+        let text: String
+        let url: URL
+        let statusCode: Int
+    }
+
+    /// 可注入 URLSession，供离线请求回归使用。
+    init(session: URLSession) {
+        super.init()
+        self.session = session
+    }
+
+    func fetch(_ source: SourceRequest) async throws -> Response {
+        for attempt in 0...source.retries {
+            try Task.checkCancellation()
+            do {
+                return try await response(for: source.request, encoding: source.encoding)
+            } catch {
+                try Task.checkCancellation()
+                let transient: Bool
+                if case NetworkError.httpError(let status) = error {
+                    transient = status == 429 || status >= 500
+                } else {
+                    transient = (error as? URLError).map { [.timedOut, .networkConnectionLost, .cannotConnectToHost].contains($0.code) } ?? false
+                }
+                guard transient, attempt < source.retries else { throw error }
+                try await Task.sleep(nanoseconds: UInt64(attempt + 1) * 200_000_000)
             }
         }
-        
-        // 添加User-Agent（如果没有设置）
+        throw NetworkError.invalidResponse
+    }
+
+    func response(for original: URLRequest, encoding: String.Encoding? = nil) async throws -> Response {
+        try Task.checkCancellation()
+        var request = original
+        request.timeoutInterval = ReadConfig.shared.requestTimeout
         if request.value(forHTTPHeaderField: "User-Agent") == nil {
             request.setValue(ReadConfig.shared.userAgent, forHTTPHeaderField: "User-Agent")
         }
-        
+        if request.value(forHTTPHeaderField: "Accept") == nil { request.setValue("*/*", forHTTPHeaderField: "Accept") }
         let (data, response) = try await session.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NetworkError.invalidResponse
-        }
-        
-        // 保存Cookie
-        var headerFields: [String: String] = [:]
-        for (key, value) in httpResponse.allHeaderFields {
-            headerFields[String(describing: key)] = String(describing: value)
-        }
-        let cookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: requestUrl)
-        if !cookies.isEmpty {
-            saveCookies(cookies, for: url)
-        }
-        
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw NetworkError.httpError(statusCode: httpResponse.statusCode)
-        }
-        
-        // 尝试检测编码
-        if let encoding = detectEncoding(from: data, response: httpResponse) {
-            return String(data: data, encoding: encoding) ?? ""
-        }
-        
-        return String(data: data, encoding: .utf8) ?? ""
+        try Task.checkCancellation()
+        guard let http = response as? HTTPURLResponse, let finalURL = http.url else { throw NetworkError.invalidResponse }
+        guard (200...299).contains(http.statusCode) else { throw NetworkError.httpError(statusCode: http.statusCode) }
+        let selected = encoding ?? detectEncoding(from: data, response: http) ?? .utf8
+        guard let text = String(data: data, encoding: selected) else { throw NetworkError.decodingError }
+        return Response(text: text, url: finalURL, statusCode: http.statusCode)
     }
-    
-    // POST 请求
+
+    func get(url: String, headers: [String: String]? = nil) async throws -> String {
+        guard let url = URL(string: url) else { throw NetworkError.invalidURL }
+        var request = URLRequest(url: url)
+        request.allHTTPHeaderFields = headers
+        return try await response(for: request).text
+    }
+
     func post(url: String, body: Data?, headers: [String: String]? = nil) async throws -> String {
-        guard let requestUrl = URL(string: url) else {
-            throw NetworkError.invalidURL
-        }
-        
-        var request = URLRequest(url: requestUrl)
+        guard let url = URL(string: url) else { throw NetworkError.invalidURL }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
-        request.timeoutInterval = ReadConfig.shared.requestTimeout
-        
-        // 添加请求头
-        if let headers = headers {
-            for (key, value) in headers {
-                request.setValue(value, forHTTPHeaderField: key)
-            }
-        }
-        
-        // 添加默认请求头
-        if request.value(forHTTPHeaderField: "User-Agent") == nil {
-            request.setValue(ReadConfig.shared.userAgent, forHTTPHeaderField: "User-Agent")
-        }
+        request.allHTTPHeaderFields = headers
         if request.value(forHTTPHeaderField: "Content-Type") == nil {
             request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         }
-        
-        let (data, response) = try await session.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NetworkError.invalidResponse
-        }
-        
-        // 保存Cookie
-        var headerFields: [String: String] = [:]
-        for (key, value) in httpResponse.allHeaderFields {
-            headerFields[String(describing: key)] = String(describing: value)
-        }
-        let cookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: requestUrl)
-        if !cookies.isEmpty {
-            saveCookies(cookies, for: url)
-        }
-        
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw NetworkError.httpError(statusCode: httpResponse.statusCode)
-        }
-        
-        if let encoding = detectEncoding(from: data, response: httpResponse) {
-            return String(data: data, encoding: encoding) ?? ""
-        }
-        
-        return String(data: data, encoding: .utf8) ?? ""
+        return try await response(for: request).text
     }
-    
+
     // 下载图片
     func downloadImage(url: String) async throws -> Data {
         guard let requestUrl = URL(string: url) else {
@@ -185,6 +144,8 @@ class NetworkManager: NSObject {
     
     // 检测编码
     private func detectEncoding(from data: Data, response: HTTPURLResponse) -> String.Encoding? {
+        if let charset = response.textEncodingName,
+           let encoding = try? SourceRequest.textEncoding(charset) { return encoding }
         // 1. 从Content-Type获取
         if let contentType = response.allHeaderFields["Content-Type"] as? String {
             if contentType.contains("charset=gbk") || contentType.contains("charset=GBK") {
@@ -205,15 +166,11 @@ class NetworkManager: NSObject {
         return .utf8
     }
     
-    // 保存Cookie
-    private func saveCookies(_ cookies: [HTTPCookie], for url: String) {
-        cookieStorage[url] = cookies
-    }
-    
-    // 获取Cookie
     func getCookies(for url: String) -> [HTTPCookie]? {
-        return cookieStorage[url]
+        guard let url = URL(string: url) else { return nil }
+        return HTTPCookieStorage.shared.cookies(for: url)
     }
+
 }
 
 // MARK: - URLSessionDelegate

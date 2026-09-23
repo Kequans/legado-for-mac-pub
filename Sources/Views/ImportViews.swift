@@ -1232,7 +1232,7 @@ struct SearchBookDetailView: View {
             // 使用 BookSourceEngine 获取完整的书籍信息
             print("📖 开始获取书籍详情: \(searchBook.bookUrl)")
             let engine = BookSourceEngine.shared
-            var book = try await engine.getBookInfo(bookUrl: searchBook.bookUrl, bookSource: bookSource)
+            var book = try await engine.getBookInfo(bookUrl: searchBook.bookUrl, bookSource: bookSource, variable: searchBook.variable)
 
             // 详情页规则可能因站点改版失效，搜索结果中的基本信息仍然可靠。
             engine.mergeSearchResult(searchBook, into: &book, bookSource: bookSource)

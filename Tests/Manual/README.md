@@ -20,3 +20,5 @@ swift build
 历史脚本中的绝对路径和旧日志仅用于追溯，新增测试应使用仓库相对路径。
 
 运行 `bash Tests/Manual/run_dom_regression.sh` 验证 Android DOM 规则兼容性（11 项离线断言，不依赖 XCTest）。
+
+`AdvancedRuleRegression.swift` 随 `run_dom_regression.sh` 运行，覆盖模板、查询语法、JS 隔离和内存网络请求/分页/取消。无需访问公网。

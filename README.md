@@ -12,7 +12,8 @@ Legado for macOS 是基于 SwiftUI 的原生阅读器，目标是把 Android 版
 - Android 版书源 JSON、书架 JSON 导入。
 - TXT 与 EPUB 本地导入、章节识别和按章节读取。
 - 在线搜索、书源发现、换源、章节缓存和预加载。
-- CSS、JSONPath、常见 XPath、正则和 JavaScript 规则解析。
+- 多链接目录/正文分页、重定向基址、统一请求配置及每次解析操作的 JS 状态隔离。
+- CSS、JSONPath 联合/切片/简单过滤、XPath 节点查询、正则和 JavaScript 规则解析。
 - Android JSOUP 链式规则、索引区间/排除、连接符、AllInOne、OnlyOne 和递归 JSONPath。
 - 标准 RSS/Atom、自定义 RSS 规则、分页和文章正文。
 - 阅读进度、滚动位置、书签、阅读历史和替换规则。

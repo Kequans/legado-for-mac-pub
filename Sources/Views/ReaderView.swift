@@ -2022,7 +2022,7 @@ struct SourceSwitcherView: View {
             
             // 获取书籍详情
             let engine = BookSourceEngine.shared
-            var newBook = try await engine.getBookInfo(bookUrl: newSource.bookUrl, bookSource: bookSource)
+            var newBook = try await engine.getBookInfo(bookUrl: newSource.bookUrl, bookSource: bookSource, variable: newSource.variable)
             engine.mergeSearchResult(newSource, into: &newBook, bookSource: bookSource)
 
             guard !newBook.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
