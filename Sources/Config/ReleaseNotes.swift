@@ -11,9 +11,32 @@ struct ReleaseNote: Identifiable {
 }
 
 enum AppReleaseInfo {
-    static let currentVersion = "2.0.2"
+    static let currentVersion = "2.0.5"
 
     static let notes: [ReleaseNote] = [
+        ReleaseNote(
+            version: "2.0.5",
+            date: "2026-10-22",
+            title: "章节加载与缓存稳定性修复",
+            summary: "改善快速切章、刷新和换源时的正文与缓存一致性。",
+            changes: [
+                "修复快速切章时旧请求覆盖当前正文或错误提示的问题。",
+                "固定预加载章节范围，避免导航变化导致章节遗漏。",
+                "修复换源后旧请求可能写入错误书籍缓存的问题。",
+                "刷新期间支持切章；切章、换源和关闭阅读窗口后丢弃过期请求结果。"
+            ]
+        ),
+        ReleaseNote(
+            version: "2.0.4",
+            date: "2026-09-23",
+            title: "阅读章节缓存刷新",
+            summary: "新增正文刷新入口，可重新获取当前章节和后续预加载章节。",
+            changes: [
+                "阅读工具栏新增刷新按钮，可强制重新获取当前章节及后续缓存章节。",
+                "刷新数量跟随“设置 → 阅读缓存”的预加载章节数。",
+                "刷新前清除目标章节旧缓存，并阻止已取消的预加载请求写回旧内容。"
+            ]
+        ),
         ReleaseNote(
             version: "2.0.2",
             date: "2026-09-23",

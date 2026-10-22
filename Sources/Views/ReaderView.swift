@@ -203,6 +203,7 @@ struct ReaderView: View {
         .onDisappear {
             // 窗口关闭时保存阅读进度（包括滚动位置）
             viewModel.saveProgress()
+            viewModel.cancelPendingLoads()
         }
         .onChange(of: viewModel.pageWidth) { _ in
             updateWindowSize()
@@ -280,6 +281,23 @@ struct ReaderView: View {
             
             Button(action: { showSettings = true }) {
                 Image(systemName: "gearshape")
+            }
+
+            if viewModel.canRefreshChapterContent {
+                Button {
+                    Task { await viewModel.refreshCurrentAndFollowingChapters() }
+                } label: {
+                    if viewModel.isRefreshingChapters {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .disabled(viewModel.isRefreshingChapters)
+                .help("重新获取本章及后续缓存章节")
+                .accessibilityLabel("刷新本章及后续章节")
             }
         }
         .padding()
@@ -1052,8 +1070,6 @@ struct ReaderSettingsView: View {
 }
 
 // ViewModel
-
-// ViewModel
 @MainActor
 class ReaderViewModel: ObservableObject {
     @Published var chapters: [BookChapter] = []
@@ -1061,8 +1077,13 @@ class ReaderViewModel: ObservableObject {
     @Published var currentChapterIndex: Int = 0
     @Published var currentChapter: BookChapter?
     @Published var content: String = "正在加载..."
+    @Published private(set) var isRefreshingChapters = false
     @Published var showToolbar: Bool = true {
         didSet { saveConfig() }
+    }
+
+    var canRefreshChapterContent: Bool {
+        !book.isLocal && !chapters.isEmpty && currentChapter != nil
     }
 
     /// 目录弹层和底部 Slider 只展示当前章节附近的窗口，完整章节数组仅用于索引和精确跳转。
@@ -1128,6 +1149,8 @@ class ReaderViewModel: ObservableObject {
     private let chapterContentDAO = ChapterContentDAO()
     private let readingDataDAO = ReadingDataDAO()
     private var isLoadingConfig = false  // 防止加载配置时触发保存
+    private var chapterRequestID = UUID()
+    private var refreshRequestID = UUID()
     private var preloadTask: Task<Void, Never>?  // 预加载任务
     private var lastPreloadStartIndex: Int = -1  // 上次预加载的起始章节索引
     private var keyboardMonitor: Any?  // 快捷键监听器
@@ -1246,6 +1269,8 @@ class ReaderViewModel: ObservableObject {
             return 
         }
         
+        cancelPendingLoads()
+        let requestID = chapterRequestID
         currentChapterIndex = index
         currentChapter = chapters[index]
         content = "正在加载..."
@@ -1269,7 +1294,8 @@ class ReaderViewModel: ObservableObject {
             // 先尝试从缓存加载
             await loadChapterFromCacheOrNetwork()
             
-            // 触发预加载（仅在需要时）
+            // 旧章节请求完成后不能启动新章节的预加载。
+            guard requestID == chapterRequestID, !Task.isCancelled else { return }
             await preloadNextChaptersIfNeeded()
         }
     }
@@ -1297,16 +1323,19 @@ class ReaderViewModel: ObservableObject {
     @discardableResult
     func loadChapterFromNetwork() async -> Bool {
         guard let chapter = currentChapter else { return false }
+        let requestID = chapterRequestID
+        let bookUrl = book.bookUrl
 
         do {
             if let bookSource = try bookSourceDAO.get(bookSourceUrl: book.origin) {
                 let fetchedContent = try await BookSourceEngine.shared.getChapterContent(chapter: chapter, bookSource: bookSource)
+                guard requestID == chapterRequestID, !Task.isCancelled else { return false }
                 content = applyReplaceRules(to: fetchedContent)
 
                 // 保存到缓存
                 let chapterContent = ChapterContent(
                     chapterUrl: chapter.url,
-                    bookUrl: book.bookUrl,
+                    bookUrl: bookUrl,
                     content: fetchedContent
                 )
                 try? chapterContentDAO.save(chapterContent)
@@ -1318,10 +1347,79 @@ class ReaderViewModel: ObservableObject {
                 return false
             }
         } catch {
+            guard requestID == chapterRequestID, !Task.isCancelled else { return false }
             print("加载章节内容失败: \(error)")
             content = "加载失败: \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// 忽略已有缓存，重新获取当前章节和配置数量的后续章节。
+    func refreshCurrentAndFollowingChapters() async {
+        guard canRefreshChapterContent, !isRefreshingChapters,
+              chapters.indices.contains(currentChapterIndex) else { return }
+
+        let startIndex = currentChapterIndex
+        let preloadCount = max(0, MainAppConfig.load().preloadChapterCount)
+        let endIndex = startIndex + min(chapters.count - startIndex - 1, preloadCount)
+        let chaptersToRefresh = Array(chapters[startIndex...endIndex])
+
+        guard let bookSource = try? bookSourceDAO.get(bookSourceUrl: book.origin) else {
+            content = "找不到书源"
+            return
+        }
+
+        cancelPendingLoads()
+        let refreshID = refreshRequestID
+        let bookUrl = book.bookUrl
+        isRefreshingChapters = true
+        defer {
+            if refreshID == refreshRequestID { isRefreshingChapters = false }
+        }
+
+        lastPreloadStartIndex = startIndex
+        content = "正在重新获取章节..."
+
+        print("🔁 开始手动刷新本章及后续 \(chaptersToRefresh.count - 1) 章")
+        var refreshedCount = 0
+
+        for (offset, chapter) in chaptersToRefresh.enumerated() {
+            guard refreshID == refreshRequestID, !Task.isCancelled else { return }
+            do {
+                // 明确使旧缓存失效；网络失败时下次打开也会重新尝试获取。
+                try chapterContentDAO.delete(chapterUrl: chapter.url)
+
+                let fetchedContent = try await BookSourceEngine.shared.getChapterContent(
+                    chapter: chapter,
+                    bookSource: bookSource
+                )
+
+                guard refreshID == refreshRequestID, !Task.isCancelled else { return }
+                if offset == 0, currentChapter?.url == chapter.url {
+                    content = applyReplaceRules(to: fetchedContent)
+                }
+
+                try chapterContentDAO.save(ChapterContent(
+                    chapterUrl: chapter.url,
+                    bookUrl: bookUrl,
+                    content: fetchedContent
+                ))
+                refreshedCount += 1
+                print("✅ 手动刷新完成: \(chapter.title)")
+            } catch {
+                guard refreshID == refreshRequestID, !Task.isCancelled else { return }
+                if offset == 0, currentChapter?.url == chapter.url {
+                    content = "刷新失败: \(error.localizedDescription)"
+                }
+                print("⚠️ 手动刷新失败: \(chapter.title) - \(error)")
+            }
+
+            if offset + 1 < chaptersToRefresh.count {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+
+        print("🎉 手动刷新结束：成功 \(refreshedCount)/\(chaptersToRefresh.count) 章")
     }
     
     /// 检查是否需要预加载
@@ -1346,17 +1444,21 @@ class ReaderViewModel: ObservableObject {
         // 取消之前的预加载任务
         preloadTask?.cancel()
         
-        // 创建新的预加载任务
+        let startIndex = currentChapterIndex
+        let chapterSnapshot = chapters
+        let bookUrl = book.bookUrl
+        let origin = book.origin
+        // 创建新的预加载任务，章节范围不随阅读导航变化。
         preloadTask = Task {
             let config = MainAppConfig.load()
             let preloadCount = config.preloadChapterCount
             
-            guard let bookSource = try? bookSourceDAO.get(bookSourceUrl: book.origin) else {
+            guard let bookSource = try? bookSourceDAO.get(bookSourceUrl: origin) else {
                 return
             }
             
             // 计算实际可预加载的章节数（不超过剩余章节）
-            let remainingChapters = chapters.count - currentChapterIndex - 1
+            let remainingChapters = chapterSnapshot.count - startIndex - 1
             let actualPreloadCount = min(preloadCount, remainingChapters)
             
             if actualPreloadCount <= 0 {
@@ -1370,10 +1472,10 @@ class ReaderViewModel: ObservableObject {
                 // 检查任务是否被取消
                 if Task.isCancelled { break }
                 
-                let nextIndex = currentChapterIndex + offset
-                guard nextIndex < chapters.count else { break }
+                let nextIndex = startIndex + offset
+                guard nextIndex < chapterSnapshot.count else { break }
                 
-                let chapter = chapters[nextIndex]
+                let chapter = chapterSnapshot[nextIndex]
                 
                 // 检查是否已缓存
                 if let isCached = try? chapterContentDAO.isCached(chapterUrl: chapter.url),
@@ -1388,10 +1490,13 @@ class ReaderViewModel: ObservableObject {
                         chapter: chapter,
                         bookSource: bookSource
                     )
+
+                    // 请求期间可能收到手动刷新并取消本任务，取消后不得再写入旧结果。
+                    guard !Task.isCancelled else { break }
                     
                     let chapterContent = ChapterContent(
                         chapterUrl: chapter.url,
-                        bookUrl: book.bookUrl,
+                        bookUrl: bookUrl,
                         content: fetchedContent
                     )
                     try? chapterContentDAO.save(chapterContent)
@@ -1539,8 +1644,19 @@ class ReaderViewModel: ObservableObject {
         pageHeight = CGFloat(max(300, min(1200, height)))
     }
     
+    /// 使已经发出的请求失效；即使底层网络晚返回，也不能更新页面或缓存。
+    func cancelPendingLoads() {
+        chapterRequestID = UUID()
+        refreshRequestID = UUID()
+        isRefreshingChapters = false
+        preloadTask?.cancel()
+        preloadTask = nil
+        lastPreloadStartIndex = -1
+    }
+
     /// 换源后重新加载
     func reloadWithNewSource(_ newBook: Book) async {
+        cancelPendingLoads()
         // 更新book引用
         let oldIndex = currentChapterIndex
         

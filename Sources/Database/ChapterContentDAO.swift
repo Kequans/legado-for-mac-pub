@@ -62,6 +62,13 @@ class ChapterContentDAO {
             try db.execute(sql: "DELETE FROM chapter_contents WHERE bookUrl = ?", arguments: [bookUrl])
         }
     }
+
+    /// 删除单章缓存，供阅读器主动刷新正文前失效旧内容。
+    func delete(chapterUrl: String) throws {
+        try db?.write { db in
+            try db.execute(sql: "DELETE FROM chapter_contents WHERE chapterUrl = ?", arguments: [chapterUrl])
+        }
+    }
     
     /// 清理过期缓存（超过30天）
     func cleanExpiredCache() throws {

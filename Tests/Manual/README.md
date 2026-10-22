@@ -16,6 +16,7 @@ swift build
 - test_rss_source_json.swift：订阅源 JSON 结构检查。
 - LocalBookImportPerformance.md：本地 TXT/EPUB 按章节读取、阅读页局部导航、缓存清理和备份恢复检查。
 - BookSourceSearchAndImport.md：书源搜索取消、书籍信息回填和 `@put/@get` 规则回归检查。
+- ReaderChapterRefresh.md：阅读器强制刷新当前章节和后续缓存章节的手工检查。
 
 历史脚本中的绝对路径和旧日志仅用于追溯，新增测试应使用仓库相对路径。
 
